@@ -69,6 +69,20 @@ export async function setCredentials(clientId: string, clientSecret: string): Pr
   await saveCredentials({ client_id: clientId, client_secret: clientSecret });
 }
 
+// 캘린더 연동 해제
+export async function resetCalendar(): Promise<void> {
+  try {
+    await fs.unlink(getCredentialsPath());
+  } catch {
+    // 파일이 없으면 무시
+  }
+  try {
+    await fs.unlink(getTokenPath());
+  } catch {
+    // 파일이 없으면 무시
+  }
+}
+
 // OAuth 인증 URL 생성
 export async function getAuthUrl(): Promise<string | null> {
   const creds = await loadCredentials();

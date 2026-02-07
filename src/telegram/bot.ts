@@ -17,7 +17,7 @@ import {
   type Workspace,
 } from "../workspace/index.js";
 import { getToolsDescription } from "../tools/index.js";
-import { getSecret, setSecret } from "../config/secrets.js";
+import { getSecret, setSecret, deleteSecret } from "../config/secrets.js";
 import { setBotInstance, restoreReminders, getReminders } from "../reminders/index.js";
 import {
   isCalendarConfigured,
@@ -28,6 +28,7 @@ import {
   exchangeCodeForToken,
   getTodayEvents,
   formatEvent,
+  resetCalendar,
 } from "../calendar/index.js";
 import {
   setBriefingBot,
@@ -348,33 +349,151 @@ export function createBot(token: string): Bot {
     }
   });
 
-  // /setup 명령어 - 추가 기능 설정 목록
+  // /setup 명령어 - 추가 기능 설정 및 관리
   bot.command("setup", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const args = ctx.message?.text?.split(" ").slice(1) || [];
+    const subcommand = args[0]?.toLowerCase();
+    const action = args[1]?.toLowerCase();
+
+    // 날씨 설정
+    if (subcommand === "weather" || subcommand === "날씨") {
+      const hasKey = !!(await getSecret("openweathermap-api-key"));
+
+      if (action === "off" || action === "끄기") {
+        if (hasKey) {
+          await deleteSecret("openweathermap-api-key");
+          await ctx.reply("✓ 날씨 기능이 비활성화되었습니다.");
+        } else {
+          await ctx.reply("날씨 기능이 이미 꺼져 있어요.");
+        }
+        return;
+      }
+
+      // 상태 및 설정 안내
+      await ctx.reply(
+        `🌤️ 날씨 기능\n\n` +
+        `상태: ${hasKey ? "✓ 활성화됨" : "✗ 비활성화"}\n\n` +
+        `${hasKey ? "• 비활성화: /setup weather off\n• 재설정: /weather_setup NEW_API_KEY" : "• 활성화: /weather_setup API_KEY"}\n\n` +
+        `API 키 발급: https://openweathermap.org`
+      );
+      return;
+    }
+
+    // 캘린더 설정
+    if (subcommand === "calendar" || subcommand === "캘린더") {
+      const configured = await isCalendarConfigured();
+      const hasCreds = await hasCredentials();
+
+      if (action === "off" || action === "끄기") {
+        if (configured || hasCreds) {
+          await resetCalendar();
+          await ctx.reply("✓ Google Calendar 연동이 해제되었습니다.");
+        } else {
+          await ctx.reply("캘린더가 이미 연결되어 있지 않아요.");
+        }
+        return;
+      }
+
+      // 상태 안내
+      let status = "✗ 비활성화";
+      if (configured) status = "✓ 연동됨";
+      else if (hasCreds) status = "⏳ 인증 대기";
+
+      await ctx.reply(
+        `📅 Google Calendar\n\n` +
+        `상태: ${status}\n\n` +
+        `${configured ? "• 연동 해제: /setup calendar off\n• 일정 보기: /calendar" : "• 연동하기: /calendar_setup"}`
+      );
+      return;
+    }
+
+    // 브리핑 설정
+    if (subcommand === "briefing" || subcommand === "브리핑") {
+      const config = await getBriefingConfig(chatId);
+      const enabled = config?.enabled ?? false;
+
+      if (action === "off" || action === "끄기") {
+        if (enabled) {
+          await disableBriefing(chatId);
+          await ctx.reply("✓ 일일 브리핑이 비활성화되었습니다.");
+        } else {
+          await ctx.reply("브리핑이 이미 꺼져 있어요.");
+        }
+        return;
+      }
+
+      if (action === "on" || action === "켜기") {
+        const time = args[2] || "08:00";
+        const city = args[3] || "Seoul";
+        await setBriefingConfig(chatId, true, time, city);
+        await ctx.reply(`✓ 일일 브리핑이 활성화되었습니다.\n매일 ${time} (${city})`);
+        return;
+      }
+
+      await ctx.reply(
+        `☀️ 일일 브리핑\n\n` +
+        `상태: ${enabled ? `✓ 활성화됨 (${config!.time}, ${config!.city})` : "✗ 비활성화"}\n\n` +
+        `• 켜기: /setup briefing on [시간] [도시]\n` +
+        `• 끄기: /setup briefing off\n` +
+        `• 테스트: /briefing now\n\n` +
+        `예: /setup briefing on 07:30 Seoul`
+      );
+      return;
+    }
+
+    // 리마인더 설정
+    if (subcommand === "reminders" || subcommand === "리마인더" || subcommand === "알림") {
+      const reminders = await getReminders(chatId);
+
+      await ctx.reply(
+        `⏰ 리마인더\n\n` +
+        `상태: ✓ 항상 활성화\n` +
+        `현재 알림: ${reminders.length}개\n\n` +
+        `• 알림 목록: /reminders\n` +
+        `• 사용법: "10분 뒤에 알려줘" 같이 말하기`
+      );
+      return;
+    }
+
+    // 전체 기능 목록
     const weatherKey = await getSecret("openweathermap-api-key");
     const calendarConfigured = await isCalendarConfigured();
+    const briefingConfig = await getBriefingConfig(chatId);
+    const reminders = await getReminders(chatId);
 
     const features = [
       {
-        name: "날씨",
-        command: "/weather_setup",
-        configured: !!weatherKey,
+        name: "🌤️ 날씨",
+        status: weatherKey ? "✓ 활성화" : "✗ 비활성화",
+        command: "/setup weather",
       },
       {
-        name: "Google Calendar",
-        command: "/calendar_setup",
-        configured: calendarConfigured,
+        name: "📅 캘린더",
+        status: calendarConfigured ? "✓ 연동됨" : "✗ 비활성화",
+        command: "/setup calendar",
+      },
+      {
+        name: "☀️ 브리핑",
+        status: briefingConfig?.enabled ? `✓ ${briefingConfig.time}` : "✗ 비활성화",
+        command: "/setup briefing",
+      },
+      {
+        name: "⏰ 리마인더",
+        status: `✓ 활성화 (${reminders.length}개)`,
+        command: "/setup reminders",
       },
     ];
 
-    let message = "⚙️ 추가 기능 설정\n\n";
+    let message = "⚙️ 기능 설정\n\n";
 
-    features.forEach((feature, index) => {
-      const status = feature.configured ? "✓ 설정됨" : "✗ 미설정";
-      message += `${index + 1}. ${feature.name} (${feature.command})\n`;
-      message += `   상태: ${status}\n\n`;
+    features.forEach((feature) => {
+      message += `${feature.name}\n`;
+      message += `   ${feature.status}\n`;
+      message += `   ${feature.command}\n\n`;
     });
 
-    message += "설정하려면 각 명령어를 입력하세요.";
+    message += "각 기능을 선택하면 상세 설정을 볼 수 있어요.";
 
     await ctx.reply(message);
   });

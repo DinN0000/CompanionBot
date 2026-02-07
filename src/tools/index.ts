@@ -174,6 +174,28 @@ export const tools = [
     },
   },
   {
+    name: "edit_file",
+    description: "Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Use this for precise, surgical edits instead of rewriting the entire file.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description: "The absolute path to the file to edit",
+        },
+        oldText: {
+          type: "string",
+          description: "Exact text to find and replace (must match exactly including whitespace)",
+        },
+        newText: {
+          type: "string",
+          description: "New text to replace the old text with",
+        },
+      },
+      required: ["path", "oldText", "newText"],
+    },
+  },
+  {
     name: "list_directory",
     description: "List files and directories in a given path.",
     input_schema: {
@@ -658,6 +680,37 @@ export async function executeTool(
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await fs.writeFile(filePath, content, "utf-8");
         return `File written successfully: ${filePath}`;
+      }
+
+      case "edit_file": {
+        const filePath = input.path as string;
+        const oldText = input.oldText as string;
+        const newText = input.newText as string;
+
+        if (!isPathAllowed(filePath)) {
+          return `Error: Access denied. Path not in allowed directories.`;
+        }
+
+        // 파일 읽기
+        let content: string;
+        try {
+          content = await fs.readFile(filePath, "utf-8");
+        } catch (error) {
+          return `Error: Could not read file "${filePath}". ${error instanceof Error ? error.message : String(error)}`;
+        }
+
+        // oldText 찾기
+        const index = content.indexOf(oldText);
+        if (index === -1) {
+          return `Error: oldText not found in file. Make sure the text matches exactly (including whitespace).`;
+        }
+
+        // 첫 번째만 교체
+        const newContent = content.slice(0, index) + newText + content.slice(index + oldText.length);
+
+        // 저장
+        await fs.writeFile(filePath, newContent, "utf-8");
+        return `File edited successfully: ${filePath}`;
       }
 
       case "list_directory": {
@@ -1382,6 +1435,7 @@ export function getToolsDescription(modelId: ModelId): string {
 ## 파일 작업
 - read_file: 파일 읽기
 - write_file: 파일 생성/수정
+- edit_file: 파일의 특정 부분만 수정 (oldText → newText, 정확히 일치해야 함)
 - list_directory: 디렉토리 탐색
 
 ## 시스템

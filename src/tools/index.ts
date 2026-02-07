@@ -1,8 +1,9 @@
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
 import * as path from "path";
-import { exec } from "child_process";
+import { exec, spawn, ChildProcess } from "child_process";
 import { promisify } from "util";
+import { randomUUID } from "crypto";
 import { MODELS, type ModelId } from "../ai/claude.js";
 import { getCurrentChatId, setModel, getModel } from "../session/state.js";
 import {
@@ -39,8 +40,42 @@ import {
   disableBriefing,
   sendBriefingNow,
 } from "../briefing/index.js";
+import {
+  spawnAgent,
+  listAgents,
+  cancelAgent,
+} from "../agents/index.js";
 
 const execAsync = promisify(exec);
+
+// ============== 세션 관리 ==============
+interface ProcessSession {
+  id: string;
+  pid: number;
+  command: string;
+  cwd: string;
+  startTime: Date;
+  endTime?: Date;
+  exitCode?: number | null;
+  outputBuffer: string[];
+  process: ChildProcess;
+  status: "running" | "completed" | "killed" | "error";
+}
+
+// 메모리에 세션 저장
+const sessions = new Map<string, ProcessSession>();
+
+// Output buffer 최대 크기 (라인 수)
+const MAX_OUTPUT_LINES = 1000;
+
+function appendOutput(session: ProcessSession, data: string) {
+  const lines = data.split("\n");
+  session.outputBuffer.push(...lines);
+  // 버퍼 크기 제한
+  if (session.outputBuffer.length > MAX_OUTPUT_LINES) {
+    session.outputBuffer = session.outputBuffer.slice(-MAX_OUTPUT_LINES);
+  }
+}
 
 // 홈 디렉토리
 const home = process.env.HOME || "";
@@ -153,7 +188,13 @@ export const tools = [
   },
   {
     name: "run_command",
-    description: "Run a shell command. Use with caution. Only for safe commands like git status, npm run, etc.",
+    description: `Run a shell command. Use with caution. Only for safe commands like git status, npm run, etc.
+
+When background=true:
+- Command runs in detached mode
+- Returns a session ID immediately
+- Use list_sessions, get_session_log, kill_session to manage
+- Useful for long-running commands (npm run dev, servers, etc.)`,
     input_schema: {
       type: "object" as const,
       properties: {
@@ -165,8 +206,68 @@ export const tools = [
           type: "string",
           description: "The working directory to run the command in (optional)",
         },
+        background: {
+          type: "boolean",
+          description: "Run in background and return session ID (default: false)",
+        },
+        timeout: {
+          type: "number",
+          description: "Timeout in seconds for foreground commands (default: 30)",
+        },
       },
       required: ["command"],
+    },
+  },
+  {
+    name: "list_sessions",
+    description: "List all background command sessions. Shows running and recently completed sessions.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        status: {
+          type: "string",
+          enum: ["all", "running", "completed"],
+          description: "Filter by status (default: all)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_session_log",
+    description: "Get the output log of a background session.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session ID to get logs from",
+        },
+        tail: {
+          type: "number",
+          description: "Number of lines from the end (default: 50)",
+        },
+      },
+      required: ["session_id"],
+    },
+  },
+  {
+    name: "kill_session",
+    description: "Kill a running background session.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session ID to kill",
+        },
+        signal: {
+          type: "string",
+          enum: ["SIGTERM", "SIGKILL", "SIGINT"],
+          description: "Signal to send (default: SIGTERM)",
+        },
+      },
+      required: ["session_id"],
     },
   },
   {
@@ -434,6 +535,56 @@ Use this when the user says things like:
       required: [],
     },
   },
+  // ============== Sub-Agent 도구 ==============
+  {
+    name: "spawn_agent",
+    description: `Create a sub-agent to handle a complex or time-consuming task independently.
+
+The sub-agent will:
+- Run in the background with its own Claude API context
+- Complete the task independently
+- Report results back to this chat when done
+
+Use this for:
+- Tasks that require deep focus or analysis
+- Long-running research or summarization
+- Work that can be done in parallel while you handle other things
+
+Example: "서브에이전트한테 이 코드 분석 시켜줘"`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        task: {
+          type: "string",
+          description: "Detailed description of the task for the sub-agent",
+        },
+      },
+      required: ["task"],
+    },
+  },
+  {
+    name: "list_agents",
+    description: "List all sub-agents and their status (running, completed, failed, cancelled).",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "cancel_agent",
+    description: "Cancel a running sub-agent by its ID.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        agent_id: {
+          type: "string",
+          description: "The sub-agent ID to cancel",
+        },
+      },
+      required: ["agent_id"],
+    },
+  },
 ];
 
 // Tool 실행 함수
@@ -478,6 +629,8 @@ export async function executeTool(
       case "run_command": {
         const command = input.command as string;
         const cwd = (input.cwd as string) || path.join(home, "Documents");
+        const background = (input.background as boolean) || false;
+        const timeout = ((input.timeout as number) || 30) * 1000;
 
         // 화이트리스트 방식: 허용된 명령어만 실행
         const ALLOWED_COMMANDS = [
@@ -505,23 +658,176 @@ export async function executeTool(
           return `Error: Dangerous argument detected.`;
         }
 
-        try {
-          // 환경 변수는 필요한 것만 화이트리스트로 전달 (민감 정보 노출 방지)
-          const safeEnv: Record<string, string> = {
-            PATH: process.env.PATH || "",
-            HOME: process.env.HOME || "",
-            USER: process.env.USER || "",
-            LANG: process.env.LANG || "en_US.UTF-8",
-            TERM: process.env.TERM || "xterm",
+        // 환경 변수는 필요한 것만 화이트리스트로 전달 (민감 정보 노출 방지)
+        const safeEnv: Record<string, string> = {
+          PATH: process.env.PATH || "",
+          HOME: process.env.HOME || "",
+          USER: process.env.USER || "",
+          LANG: process.env.LANG || "en_US.UTF-8",
+          TERM: process.env.TERM || "xterm",
+        };
+
+        // Background 실행
+        if (background) {
+          const sessionId = randomUUID().slice(0, 8);
+          
+          const child = spawn("sh", ["-c", command], {
+            cwd,
+            env: safeEnv,
+            detached: true,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+
+          const session: ProcessSession = {
+            id: sessionId,
+            pid: child.pid!,
+            command,
+            cwd,
+            startTime: new Date(),
+            outputBuffer: [],
+            process: child,
+            status: "running",
           };
+
+          // stdout/stderr 캡처
+          child.stdout?.on("data", (data: Buffer) => {
+            appendOutput(session, data.toString());
+          });
+          child.stderr?.on("data", (data: Buffer) => {
+            appendOutput(session, `[stderr] ${data.toString()}`);
+          });
+
+          // 프로세스 종료 핸들링
+          child.on("close", (code) => {
+            session.endTime = new Date();
+            session.exitCode = code;
+            session.status = code === 0 ? "completed" : "error";
+          });
+
+          child.on("error", (err) => {
+            session.status = "error";
+            appendOutput(session, `[error] ${err.message}`);
+          });
+
+          // unref로 부모 프로세스와 분리
+          child.unref();
+
+          sessions.set(sessionId, session);
+
+          return `Background session started.
+Session ID: ${sessionId}
+PID: ${child.pid}
+Command: ${command}
+CWD: ${cwd}
+
+Use list_sessions to see all sessions, get_session_log to view output, kill_session to terminate.`;
+        }
+
+        // Foreground 실행 (기존 방식)
+        try {
           const { stdout, stderr } = await execAsync(command, {
             cwd,
-            timeout: 30000,
+            timeout,
             env: safeEnv,
           });
           return stdout || stderr || "Command executed (no output)";
         } catch (error) {
           return `Error: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+
+      case "list_sessions": {
+        const statusFilter = (input.status as string) || "all";
+        
+        const sessionList: string[] = [];
+        
+        for (const [id, session] of sessions) {
+          // 상태 필터링
+          if (statusFilter !== "all") {
+            if (statusFilter === "running" && session.status !== "running") continue;
+            if (statusFilter === "completed" && session.status === "running") continue;
+          }
+
+          const runtime = session.endTime 
+            ? `${Math.round((session.endTime.getTime() - session.startTime.getTime()) / 1000)}s`
+            : `${Math.round((Date.now() - session.startTime.getTime()) / 1000)}s (running)`;
+
+          const status = session.status === "running" 
+            ? "🟢 running" 
+            : session.status === "completed" 
+              ? "✅ completed" 
+              : session.status === "killed"
+                ? "🔴 killed"
+                : "❌ error";
+
+          sessionList.push(`[${id}] ${status}
+  Command: ${session.command}
+  PID: ${session.pid}
+  Runtime: ${runtime}
+  Exit code: ${session.exitCode ?? "N/A"}`);
+        }
+
+        if (sessionList.length === 0) {
+          return `No sessions found${statusFilter !== "all" ? ` with status "${statusFilter}"` : ""}.`;
+        }
+
+        return `Sessions (${sessionList.length}):\n\n${sessionList.join("\n\n")}`;
+      }
+
+      case "get_session_log": {
+        const sessionId = input.session_id as string;
+        const tail = (input.tail as number) || 50;
+
+        const session = sessions.get(sessionId);
+        if (!session) {
+          return `Error: Session "${sessionId}" not found. Use list_sessions to see available sessions.`;
+        }
+
+        const lines = session.outputBuffer.slice(-tail);
+        
+        if (lines.length === 0) {
+          return `Session ${sessionId} has no output yet.
+Status: ${session.status}
+Command: ${session.command}`;
+        }
+
+        const header = `Session: ${sessionId} (${session.status})
+Command: ${session.command}
+Showing last ${lines.length} lines:
+${"─".repeat(40)}`;
+
+        return `${header}\n${lines.join("\n")}`;
+      }
+
+      case "kill_session": {
+        const sessionId = input.session_id as string;
+        const signal = (input.signal as NodeJS.Signals) || "SIGTERM";
+
+        const session = sessions.get(sessionId);
+        if (!session) {
+          return `Error: Session "${sessionId}" not found.`;
+        }
+
+        if (session.status !== "running") {
+          return `Session ${sessionId} is not running (status: ${session.status}).`;
+        }
+
+        try {
+          // Process group kill (negative PID)
+          process.kill(-session.pid, signal);
+          session.status = "killed";
+          session.endTime = new Date();
+          return `Session ${sessionId} (PID ${session.pid}) killed with ${signal}.`;
+        } catch (error) {
+          // 단일 프로세스 kill 시도
+          try {
+            session.process.kill(signal);
+            session.status = "killed";
+            session.endTime = new Date();
+            return `Session ${sessionId} killed with ${signal}.`;
+          } catch (e) {
+            return `Error killing session: ${error instanceof Error ? error.message : String(error)}`;
+          }
         }
       }
 
@@ -854,6 +1160,62 @@ export async function executeTool(
         return "Briefing sent!";
       }
 
+      // ============== Sub-Agent 도구 ==============
+      case "spawn_agent": {
+        const chatId = getCurrentChatId();
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        const task = input.task as string;
+        if (!task || task.trim().length === 0) {
+          return "Error: Task description is required";
+        }
+
+        const agentId = await spawnAgent(task, chatId);
+        return `Sub-agent spawned! 🤖\nID: ${agentId}\nTask: ${task.slice(0, 100)}${task.length > 100 ? "..." : ""}\n\nThe agent is working in the background. Results will be sent to this chat when complete.`;
+      }
+
+      case "list_agents": {
+        const chatId = getCurrentChatId();
+        const agents = listAgents(chatId || undefined);
+
+        if (agents.length === 0) {
+          return "No sub-agents found.";
+        }
+
+        const lines = agents.map((a) => {
+          const status = {
+            running: "🔄 Running",
+            completed: "✅ Completed",
+            failed: "❌ Failed",
+            cancelled: "⏹️ Cancelled",
+          }[a.status];
+
+          const time = a.completedAt
+            ? `(${Math.round((a.completedAt.getTime() - a.createdAt.getTime()) / 1000)}s)`
+            : "";
+
+          return `${a.id}: ${status} ${time}\n   Task: ${a.task.slice(0, 60)}${a.task.length > 60 ? "..." : ""}`;
+        });
+
+        return `Sub-agents:\n${lines.join("\n\n")}`;
+      }
+
+      case "cancel_agent": {
+        const agentId = input.agent_id as string;
+        if (!agentId) {
+          return "Error: Agent ID is required";
+        }
+
+        const success = cancelAgent(agentId);
+        if (success) {
+          return `Sub-agent ${agentId} cancelled.`;
+        } else {
+          return `Could not cancel agent ${agentId}. It may not exist or already completed.`;
+        }
+      }
+
       default:
         return `Error: Unknown tool: ${name}`;
     }
@@ -877,6 +1239,10 @@ export function getToolsDescription(modelId: ModelId): string {
 
 ## 시스템
 - run_command: 셸 명령어 실행 (git, npm 등)
+  - background=true: 백그라운드 실행, 세션 ID 반환
+- list_sessions: 백그라운드 세션 목록
+- get_session_log: 세션 출력 로그 조회
+- kill_session: 세션 종료
 - change_model: AI 모델 변경
   - sonnet: 범용 (기본)
   - opus: 복잡한 작업
@@ -908,6 +1274,11 @@ export function getToolsDescription(modelId: ModelId): string {
 
 ## 온보딩
 - save_persona: 페르소나 설정 저장 (온보딩 완료 시)
+
+## Sub-Agent (백그라운드 작업)
+- spawn_agent: 복잡한 작업을 sub-agent에게 위임 (독립 실행)
+- list_agents: 활성 sub-agent 목록
+- cancel_agent: sub-agent 취소
 
 허용된 경로: ${path.join(home, "Documents")}, ${path.join(home, "projects")}, 워크스페이스`;
 }

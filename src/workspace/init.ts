@@ -4,6 +4,7 @@ import {
   getWorkspacePath,
   getTemplatesPath,
   getMemoryDirPath,
+  getCanvasPath,
   WORKSPACE_FILES,
 } from "./paths.js";
 
@@ -32,6 +33,9 @@ export async function initWorkspace(): Promise<void> {
 
   // 메모리 디렉토리 생성
   await fs.mkdir(memoryPath, { recursive: true });
+
+  // canvas 디렉토리 생성
+  await fs.mkdir(getCanvasPath(), { recursive: true });
 
   // 템플릿 파일 복사
   for (const file of WORKSPACE_FILES) {

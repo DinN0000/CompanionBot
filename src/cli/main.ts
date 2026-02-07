@@ -6,6 +6,9 @@ import {
   getWorkspacePath,
 } from "../workspace/index.js";
 import { createBot } from "../telegram/bot.js";
+import { cleanupHeartbeats } from "../heartbeat/index.js";
+import { cleanupBriefings } from "../briefing/index.js";
+import { cleanupReminders } from "../reminders/index.js";
 
 function createPrompt(): readline.Interface {
   return readline.createInterface({
@@ -127,14 +130,17 @@ async function main() {
 
   const bot = createBot(token);
 
-  // 종료 핸들링
-  process.once("SIGINT", () => {
+  // Graceful shutdown
+  function shutdown(): void {
     console.log("\n👋 봇을 종료합니다...");
+    cleanupHeartbeats();
+    cleanupBriefings();
+    cleanupReminders();
     bot.stop();
-  });
-  process.once("SIGTERM", () => {
-    bot.stop();
-  });
+  }
+
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 
   bot.start({
     onStart: (botInfo) => {

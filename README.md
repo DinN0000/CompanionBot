@@ -8,34 +8,54 @@ AI 친구 텔레그램 봇. Claude API 기반으로 개인화된 페르소나를
 - 첫 실행 시 온보딩으로 페르소나 설정
 - 이미지 분석 (사진 보내면 분석)
 - 링크 요약 (URL 보내면 내용 요약)
-- 날씨 조회 ("서울 날씨 어때?" 같이 물어보면 현재 날씨 알려줌)
+- 날씨 조회 ("서울 날씨 어때?")
+- 리마인더 ("10분 뒤에 알려줘")
+- Google Calendar 연동
+- 일일 브리핑 (매일 아침 날씨/일정)
+- Heartbeat (주기적 체크 후 알림)
 - 일일 메모리 자동 저장
-- PM2로 항상 실행
 
 ## 설치
 
-### 1. 사전 준비
-
-- Node.js 18+
-- Telegram Bot Token (@BotFather에서 발급)
-- Anthropic API Key (console.anthropic.com)
-
-### 2. 클론 및 설치
+### 간편 설치 (일반 사용자)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/companionbot.git
+npm install -g companionbot
+companionbot
+```
+
+첫 실행 시 자동으로 설정을 안내합니다.
+
+### 개발자 설치 (소스코드 수정)
+
+```bash
+git clone https://github.com/hwai/companionbot.git
 cd companionbot
 npm install
 npm run build
-```
-
-### 3. 첫 실행
-
-```bash
 npm start
 ```
 
-첫 실행 시 인터랙티브하게 설정을 진행합니다:
+### 사전 준비
+
+- **Node.js 18+**
+- **Telegram Bot Token** - @BotFather에서 발급
+- **Anthropic API Key** - console.anthropic.com
+
+#### Linux 사용자 (keytar 의존성)
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install libsecret-1-dev
+
+# Fedora
+sudo dnf install libsecret-devel
+
+# Arch
+sudo pacman -S libsecret
+```
+
+## 첫 실행
 
 ```
 🤖 CompanionBot 첫 실행입니다!
@@ -51,139 +71,78 @@ npm start
 📁 워크스페이스 생성 중...
    → ~/.companionbot/ 생성 완료
 
-🔧 추가 기능을 설정하시겠습니까? (y/n): _
-
-[선택] 추가 기능 설정
-   날씨 API 설정하시겠습니까? (y/n): _
-   → OpenWeatherMap API Key: _
-
 🚀 봇을 시작합니다!
 ```
 
-### API 키 설정 (선택)
+## 명령어
 
-날씨 기능을 사용하려면 OpenWeatherMap API 키가 필요합니다:
-1. https://openweathermap.org/api 에서 무료 계정 생성
-2. API Keys 메뉴에서 키 발급
-3. 텔레그램에서 `/weather_setup` 명령으로 키 등록
+| 명령어 | 설명 |
+|--------|------|
+| `/start` | 봇 시작 (첫 실행 시 온보딩) |
+| `/setup` | 기능 설정 메뉴 |
+| `/briefing` | 일일 브리핑 토글 |
+| `/heartbeat` | Heartbeat 토글 |
+| `/reminders` | 알림 목록 |
+| `/calendar` | 오늘 일정 |
+| `/compact` | 대화 정리 |
+| `/memory` | 최근 기억 |
+| `/reset` | 페르소나 초기화 |
 
-### 4. PM2로 상시 실행 (선택)
+### 자연어 명령
 
-```bash
-# PM2 설치
-npm install -g pm2
+명령어 대신 자연어로 말해도 됩니다:
 
-# 봇 등록 및 시작
-pm2 start npm --name companionbot -- start
-
-# 상태 확인
-pm2 status
-
-# 로그 보기
-pm2 logs companionbot
-
-# 재시작
-pm2 restart companionbot
-
-# 중지
-pm2 stop companionbot
-```
-
-시스템 재부팅 후 자동 시작:
-```bash
-pm2 startup
-pm2 save
-```
-
-## 사용법
-
-### 텔레그램 명령어
-
-- `/start` - 봇 시작 (첫 실행 시 온보딩)
-- `/compact` - 대화 히스토리 정리
-- `/memory` - 최근 기억 보기
-- `/model` - AI 모델 변경
-- `/reset` - 페르소나 초기화
-- `/setup` - 추가 기능 설정 현황 보기
-- `/weather_setup` - 날씨 API 키 설정
-
-### 자연어 기능
-
-- 사진 보내기 → 이미지 분석
-- URL 보내기 → 링크 내용 요약
-- "opus로 바꿔줘" → 모델 변경
+- "하이쿠로 바꿔줘" → 모델 변경
+- "10분 뒤에 알려줘" → 리마인더
+- "브리핑 꺼줘" → 브리핑 비활성화
+- "아침 9시에 브리핑 해줘" → 브리핑 시간 설정
+- "지금 브리핑 해줘" → 즉시 브리핑
+- "하트비트 켜줘" → Heartbeat 활성화
+- "서울 날씨 어때?" → 날씨 조회
 - "이거 기억해둬" → 메모리 저장
-- "서울 날씨 어때?" → 현재 날씨 조회
 
-## 프로젝트 구조
+## PM2로 상시 실행
 
-```
-companionbot/
-├── src/
-│   ├── cli/
-│   │   └── main.ts        # CLI 진입점
-│   ├── telegram/
-│   │   └── bot.ts         # 텔레그램 봇 핸들러
-│   ├── ai/
-│   │   └── claude.ts      # Claude API 통신
-│   ├── workspace/
-│   │   ├── paths.ts       # 경로 상수
-│   │   ├── init.ts        # 워크스페이스 초기화
-│   │   ├── load.ts        # 파일 로드/저장
-│   │   └── index.ts       # 통합 export
-│   ├── tools/
-│   │   └── index.ts       # AI 도구 정의
-│   ├── session/
-│   │   └── state.ts       # 세션 상태 관리
-│   └── config/
-│       └── secrets.ts     # 시크릿 관리 (keychain)
-├── templates/             # 워크스페이스 템플릿
-│   ├── BOOTSTRAP.md       # 온보딩 프롬프트
-│   ├── IDENTITY.md        # 봇 정체성
-│   ├── SOUL.md            # 봇 성격
-│   ├── USER.md            # 사용자 정보
-│   ├── AGENTS.md          # 운영 지침
-│   └── MEMORY.md          # 장기 기억
-├── bin/
-│   └── companionbot.js    # npm global 진입점
-├── dist/                  # 빌드 결과물
-└── package.json
+```bash
+npm install -g pm2
+pm2 start npm --name companionbot -- start
+pm2 startup && pm2 save
 ```
 
 ## 워크스페이스
 
-`~/.companionbot/` 에 저장되는 파일들:
+`~/.companionbot/` 구조:
 
-| 파일 | 설명 |
-|------|------|
-| `IDENTITY.md` | 봇 이름, 이모지, 바이브 |
-| `SOUL.md` | 성격, 말투, 철학 |
-| `USER.md` | 사용자 정보 |
-| `AGENTS.md` | 운영 지침 |
-| `MEMORY.md` | 장기 기억 |
-| `memory/YYYY-MM-DD.md` | 일일 기억 |
-
-## 개발
-
-```bash
-# 개발 모드 (hot reload)
-npm run dev
-
-# 빌드
-npm run build
-
-# 빌드 후 실행
-npm start
+```
+├── AGENTS.md      # 운영 지침
+├── BOOTSTRAP.md   # 온보딩 (완료 후 삭제)
+├── HEARTBEAT.md   # 주기적 체크 항목
+├── IDENTITY.md    # 봇 정체성
+├── MEMORY.md      # 장기 기억
+├── SOUL.md        # 봇 성격
+├── TOOLS.md       # 도구 설정
+├── USER.md        # 사용자 정보
+├── canvas/        # 봇 작업 디렉토리
+└── memory/        # 일일 로그
+    └── YYYY-MM-DD.md
 ```
 
-## 시크릿 저장 위치
+## 시크릿 저장
 
-OS 키체인에 저장됩니다:
+OS 키체인에 안전하게 저장됩니다:
 - macOS: Keychain Access
 - Windows: Credential Manager
 - Linux: libsecret
 
-수동으로 재설정하려면 `~/.companionbot/` 삭제 후 다시 실행하세요.
+재설정: `~/.companionbot/` 삭제 후 다시 실행
+
+## 개발
+
+```bash
+npm run dev    # 개발 모드
+npm run build  # 빌드
+npm start      # 실행
+```
 
 ## License
 

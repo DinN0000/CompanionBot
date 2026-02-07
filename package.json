@@ -1,7 +1,30 @@
 {
   "name": "companionbot",
   "version": "0.1.0",
+  "description": "AI 친구 텔레그램 봇 - Claude API 기반 개인화된 대화 상대",
+  "keywords": [
+    "telegram",
+    "bot",
+    "claude",
+    "ai",
+    "chatbot",
+    "companion",
+    "anthropic"
+  ],
+  "author": "hwai",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hwai/companionbot.git"
+  },
+  "homepage": "https://github.com/hwai/companionbot#readme",
+  "bugs": {
+    "url": "https://github.com/hwai/companionbot/issues"
+  },
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "bin": {
     "companionbot": "./bin/companionbot.js"
   },
@@ -14,7 +37,8 @@
     "dev": "tsx src/cli/main.ts",
     "start": "node dist/cli/main.js",
     "build": "tsc",
-    "setup": "tsx src/cli/setup.ts"
+    "setup": "tsx src/cli/setup.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

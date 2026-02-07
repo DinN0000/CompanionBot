@@ -50,8 +50,12 @@ export async function chat(
     tools: tools,
   });
 
-  // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복
-  while (response.stop_reason === "tool_use") {
+  // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복 (최대 10회)
+  const MAX_TOOL_ITERATIONS = 10;
+  let iterations = 0;
+
+  while (response.stop_reason === "tool_use" && iterations < MAX_TOOL_ITERATIONS) {
+    iterations++;
     const toolUseBlocks = response.content.filter(
       (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
     );
@@ -99,6 +103,12 @@ export async function chat(
       messages: apiMessages,
       tools: tools,
     });
+  }
+
+  // 반복 횟수 초과 시 경고
+  if (iterations >= MAX_TOOL_ITERATIONS) {
+    console.warn(`[Warning] Tool use loop reached max iterations (${MAX_TOOL_ITERATIONS})`);
+    return "도구 실행이 너무 많이 반복됐어. 다시 시도해줄래?";
   }
 
   // 최종 텍스트 응답 추출

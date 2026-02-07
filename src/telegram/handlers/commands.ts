@@ -1,0 +1,615 @@
+import { Bot } from "grammy";
+import { chat, MODELS, type ModelId } from "../../ai/claude.js";
+import {
+  getHistory,
+  clearHistory,
+  getModel,
+  setModel,
+  setCurrentChatId,
+} from "../../session/state.js";
+import {
+  hasBootstrap,
+  loadRecentMemories,
+  getWorkspacePath,
+} from "../../workspace/index.js";
+import { getSecret, setSecret, deleteSecret } from "../../config/secrets.js";
+import { getReminders } from "../../reminders/index.js";
+import {
+  isCalendarConfigured,
+  hasCredentials,
+  setCredentials,
+  getAuthUrl,
+  startAuthServer,
+  exchangeCodeForToken,
+  getTodayEvents,
+  formatEvent,
+  resetCalendar,
+} from "../../calendar/index.js";
+import {
+  setBriefingConfig,
+  getBriefingConfig,
+  disableBriefing,
+} from "../../briefing/index.js";
+import {
+  setHeartbeatConfig,
+  getHeartbeatConfig,
+  disableHeartbeat,
+} from "../../heartbeat/index.js";
+import {
+  getWorkspace,
+  invalidateWorkspaceCache,
+  buildSystemPrompt,
+  extractName,
+} from "../utils/index.js";
+
+export function registerCommands(bot: Bot): void {
+  // /start 명령어
+  bot.command("start", async (ctx) => {
+    const chatId = ctx.chat.id;
+    clearHistory(chatId);
+    setModel(chatId, "sonnet");
+    setCurrentChatId(chatId);
+
+    // 워크스페이스 캐시 무효화
+    invalidateWorkspaceCache();
+
+    // BOOTSTRAP 모드 확인
+    const isBootstrap = await hasBootstrap();
+
+    if (isBootstrap) {
+      // 온보딩 모드: 봇이 먼저 인사
+      await ctx.replyWithChatAction("typing");
+
+      const history = getHistory(chatId);
+      const modelId = getModel(chatId);
+      const systemPrompt = await buildSystemPrompt(modelId);
+
+      // 첫 메시지 생성 요청
+      history.push({
+        role: "user",
+        content: "[시스템: 사용자가 /start를 눌렀습니다. 온보딩을 시작하세요.]",
+      });
+
+      try {
+        const response = await chat(history, systemPrompt, modelId);
+        history.push({ role: "assistant", content: response });
+        await ctx.reply(response);
+      } catch (error) {
+        console.error("Bootstrap start error:", error);
+        await ctx.reply(
+          "안녕! 반가워. 난 방금 태어난 AI야. 아직 이름도 없어.\n" +
+          "너와 함께 나를 만들어가고 싶은데... 혹시 이름 지어줄 수 있어?"
+        );
+      }
+    } else {
+      // 일반 모드
+      const workspace = await getWorkspace();
+      const name = extractName(workspace.identity) || "CompanionBot";
+
+      await ctx.reply(
+        `안녕! ${name}이야.\n\n` +
+        `명령어:\n` +
+        `/clear - 대화 초기화\n` +
+        `/model - AI 모델 변경\n` +
+        `/reset - 페르소나 리셋`
+      );
+    }
+  });
+
+  // /reset 명령어 - 페르소나 리셋
+  bot.command("reset", async (ctx) => {
+    await ctx.reply(
+      "정말 페르소나를 리셋할까요?\n" +
+      "모든 설정이 초기화되고 온보딩을 다시 진행합니다.\n\n" +
+      "확인하려면 /confirm_reset 을 입력하세요."
+    );
+  });
+
+  bot.command("confirm_reset", async (ctx) => {
+    const { initWorkspace } = await import("../../workspace/index.js");
+    const { rm } = await import("fs/promises");
+
+    try {
+      await rm(getWorkspacePath(), { recursive: true, force: true });
+      await initWorkspace();
+      invalidateWorkspaceCache();
+      clearHistory(ctx.chat.id);
+
+      await ctx.reply(
+        "✓ 페르소나가 리셋되었습니다.\n" +
+        "/start 를 눌러 온보딩을 시작하세요."
+      );
+    } catch (error) {
+      console.error("Reset error:", error);
+      await ctx.reply("리셋 중 오류가 발생했습니다.");
+    }
+  });
+
+  // /compact 명령어 - 대화 압축 (컨텍스트 절약)
+  bot.command("compact", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const history = getHistory(chatId);
+
+    if (history.length <= 4) {
+      await ctx.reply("아직 정리할 대화가 별로 없어!");
+      return;
+    }
+
+    // 최근 4개만 남기고 정리
+    const removed = history.length - 4;
+    history.splice(0, removed);
+
+    await ctx.reply(`대화 정리 완료! ${removed}개 메시지 압축했어.`);
+  });
+
+  // /memory 명령어 - 최근 기억 보기
+  bot.command("memory", async (ctx) => {
+    const memories = await loadRecentMemories(7);
+
+    if (!memories.trim()) {
+      await ctx.reply("아직 기억해둔 게 없어!");
+      return;
+    }
+
+    // 너무 길면 자르기
+    const truncated = memories.length > 2000
+      ? memories.slice(0, 2000) + "\n\n... (더 있음)"
+      : memories;
+
+    await ctx.reply(`📝 최근 일주일 기억:\n\n${truncated}`);
+  });
+
+  // /model 명령어 - 모델 변경
+  bot.command("model", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const arg = ctx.message?.text?.split(" ")[1]?.toLowerCase();
+
+    if (!arg) {
+      const currentModel = getModel(chatId);
+      const modelList = Object.entries(MODELS)
+        .map(([id, m]) => `${id === currentModel ? "→" : "  "} /model ${id} - ${m.name}`)
+        .join("\n");
+
+      await ctx.reply(
+        `Current model: ${MODELS[currentModel].name}\n\n` +
+        `Available models:\n${modelList}\n\n` +
+        `Tip: You can also ask me to change models in natural language!`
+      );
+      return;
+    }
+
+    if (arg in MODELS) {
+      const modelId = arg as ModelId;
+      setModel(chatId, modelId);
+      await ctx.reply(`Model changed to: ${MODELS[modelId].name}`);
+    } else {
+      await ctx.reply(
+        `Unknown model: ${arg}\n\n` +
+        `Available: sonnet, opus, haiku`
+      );
+    }
+  });
+
+  // /setup 명령어 - 추가 기능 설정 및 관리
+  bot.command("setup", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const args = ctx.message?.text?.split(" ").slice(1) || [];
+    const subcommand = args[0]?.toLowerCase();
+    const action = args[1]?.toLowerCase();
+
+    // 날씨 설정
+    if (subcommand === "weather" || subcommand === "날씨") {
+      const hasKey = !!(await getSecret("openweathermap-api-key"));
+
+      if (action === "off" || action === "끄기") {
+        if (hasKey) {
+          await deleteSecret("openweathermap-api-key");
+          await ctx.reply("✓ 날씨 기능이 비활성화되었습니다.");
+        } else {
+          await ctx.reply("날씨 기능이 이미 꺼져 있어요.");
+        }
+        return;
+      }
+
+      // 상태 및 설정 안내
+      await ctx.reply(
+        `🌤️ 날씨 기능\n\n` +
+        `상태: ${hasKey ? "✓ 활성화됨" : "✗ 비활성화"}\n\n` +
+        `${hasKey ? "• 비활성화: /setup weather off\n• 재설정: /weather_setup NEW_API_KEY" : "• 활성화: /weather_setup API_KEY"}\n\n` +
+        `API 키 발급: https://openweathermap.org`
+      );
+      return;
+    }
+
+    // 캘린더 설정
+    if (subcommand === "calendar" || subcommand === "캘린더") {
+      const configured = await isCalendarConfigured();
+      const hasCreds = await hasCredentials();
+
+      if (action === "off" || action === "끄기") {
+        if (configured || hasCreds) {
+          await resetCalendar();
+          await ctx.reply("✓ Google Calendar 연동이 해제되었습니다.");
+        } else {
+          await ctx.reply("캘린더가 이미 연결되어 있지 않아요.");
+        }
+        return;
+      }
+
+      // 상태 안내
+      let status = "✗ 비활성화";
+      if (configured) {
+        status = "✓ 연동됨";
+      } else if (hasCreds) {
+        status = "⏳ 인증 대기";
+      }
+
+      await ctx.reply(
+        `📅 Google Calendar\n\n` +
+        `상태: ${status}\n\n` +
+        `${configured ? "• 연동 해제: /setup calendar off\n• 일정 보기: /calendar" : "• 연동하기: /calendar_setup"}`
+      );
+      return;
+    }
+
+    // 브리핑 설정
+    if (subcommand === "briefing" || subcommand === "브리핑") {
+      const config = await getBriefingConfig(chatId);
+      const enabled = config?.enabled ?? false;
+
+      if (action === "off" || action === "끄기") {
+        if (enabled) {
+          await disableBriefing(chatId);
+          await ctx.reply("✓ 일일 브리핑이 비활성화되었습니다.");
+        } else {
+          await ctx.reply("브리핑이 이미 꺼져 있어요.");
+        }
+        return;
+      }
+
+      if (action === "on" || action === "켜기") {
+        const time = args[2] || "08:00";
+        const city = args[3] || "Seoul";
+        await setBriefingConfig(chatId, true, time, city);
+        await ctx.reply(`✓ 일일 브리핑이 활성화되었습니다.\n매일 ${time} (${city})`);
+        return;
+      }
+
+      await ctx.reply(
+        `☀️ 일일 브리핑\n\n` +
+        `상태: ${enabled ? `✓ 활성화됨 (${config!.time}, ${config!.city})` : "✗ 비활성화"}\n\n` +
+        `• 켜기: /setup briefing on [시간] [도시]\n` +
+        `• 끄기: /setup briefing off\n` +
+        `• 테스트: /briefing now\n\n` +
+        `예: /setup briefing on 07:30 Seoul`
+      );
+      return;
+    }
+
+    // 리마인더 설정
+    if (subcommand === "reminders" || subcommand === "리마인더" || subcommand === "알림") {
+      const reminders = await getReminders(chatId);
+
+      await ctx.reply(
+        `⏰ 리마인더\n\n` +
+        `상태: ✓ 항상 활성화\n` +
+        `현재 알림: ${reminders.length}개\n\n` +
+        `• 알림 목록: /reminders\n` +
+        `• 사용법: "10분 뒤에 알려줘" 같이 말하기`
+      );
+      return;
+    }
+
+    // Heartbeat 설정
+    if (subcommand === "heartbeat" || subcommand === "하트비트") {
+      const config = await getHeartbeatConfig(chatId);
+      const enabled = config?.enabled ?? false;
+
+      if (action === "off" || action === "끄기") {
+        if (enabled) {
+          await disableHeartbeat(chatId);
+          await ctx.reply("✓ Heartbeat가 비활성화되었습니다.");
+        } else {
+          await ctx.reply("Heartbeat가 이미 꺼져 있어요.");
+        }
+        return;
+      }
+
+      if (action === "on" || action === "켜기") {
+        const minutes = parseInt(args[2]) || 30;
+        await setHeartbeatConfig(chatId, true, minutes);
+        await ctx.reply(`✓ Heartbeat가 활성화되었습니다.\n${minutes}분마다 체크합니다.`);
+        return;
+      }
+
+      const intervalMin = config ? Math.floor(config.intervalMs / 60000) : 30;
+      await ctx.reply(
+        `💓 Heartbeat\n\n` +
+        `상태: ${enabled ? `✓ 활성화됨 (${intervalMin}분 간격)` : "✗ 비활성화"}\n\n` +
+        `• 켜기: /setup heartbeat on [분]\n` +
+        `• 끄기: /setup heartbeat off\n` +
+        `• 테스트: /heartbeat now\n\n` +
+        `HEARTBEAT.md를 편집해서 체크 항목을 설정하세요.`
+      );
+      return;
+    }
+
+    // 전체 기능 목록
+    const weatherKey = await getSecret("openweathermap-api-key");
+    const calendarConfigured = await isCalendarConfigured();
+    const briefingConfig = await getBriefingConfig(chatId);
+    const reminders = await getReminders(chatId);
+    const heartbeatConfig = await getHeartbeatConfig(chatId);
+
+    const features = [
+      {
+        name: "🌤️ 날씨",
+        status: weatherKey ? "✓ 활성화" : "✗ 비활성화",
+        command: "/setup weather",
+      },
+      {
+        name: "📅 캘린더",
+        status: calendarConfigured ? "✓ 연동됨" : "✗ 비활성화",
+        command: "/setup calendar",
+      },
+      {
+        name: "☀️ 브리핑",
+        status: briefingConfig?.enabled ? `✓ ${briefingConfig.time}` : "✗ 비활성화",
+        command: "/setup briefing",
+      },
+      {
+        name: "⏰ 리마인더",
+        status: `✓ 활성화 (${reminders.length}개)`,
+        command: "/setup reminders",
+      },
+      {
+        name: "💓 Heartbeat",
+        status: heartbeatConfig?.enabled ? `✓ ${Math.floor(heartbeatConfig.intervalMs / 60000)}분` : "✗ 비활성화",
+        command: "/setup heartbeat",
+      },
+    ];
+
+    let message = "⚙️ 기능 설정\n\n";
+
+    for (const feature of features) {
+      message += `${feature.name}\n`;
+      message += `   ${feature.status}\n`;
+      message += `   ${feature.command}\n\n`;
+    }
+
+    message += "각 기능을 선택하면 상세 설정을 볼 수 있어요.";
+
+    await ctx.reply(message);
+  });
+
+  // /weather_setup 명령어 - 날씨 API 키 설정
+  bot.command("weather_setup", async (ctx) => {
+    const arg = ctx.message?.text?.split(" ").slice(1).join(" ");
+
+    if (!arg) {
+      const hasKey = await getSecret("openweathermap-api-key");
+      await ctx.reply(
+        `날씨 API 설정\n\n` +
+        `상태: ${hasKey ? "✓ 설정됨" : "✗ 미설정"}\n\n` +
+        `설정 방법:\n` +
+        `1. https://openweathermap.org 가입\n` +
+        `2. API Keys에서 키 발급\n` +
+        `3. /weather_setup YOUR_API_KEY 입력`
+      );
+      return;
+    }
+
+    await setSecret("openweathermap-api-key", arg);
+    await ctx.reply("✓ 날씨 API 키가 설정되었습니다!");
+  });
+
+  // /reminders 명령어 - 알림 목록
+  bot.command("reminders", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const reminders = await getReminders(chatId);
+
+    if (reminders.length === 0) {
+      await ctx.reply("📭 설정된 알림이 없어요.\n\n\"10분 뒤에 알려줘\" 같이 말해보세요!");
+      return;
+    }
+
+    let message = "⏰ 알림 목록\n\n";
+
+    for (const r of reminders) {
+      const time = new Date(r.scheduledAt).toLocaleString("ko-KR", {
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "numeric",
+      });
+      message += `• ${r.message}\n  📅 ${time}\n  🔖 ID: ${r.id}\n\n`;
+    }
+
+    message += "취소하려면 \"리마인더 취소해줘\" 라고 말해주세요.";
+
+    await ctx.reply(message);
+  });
+
+  // /calendar_setup 명령어 - Google Calendar 연동
+  bot.command("calendar_setup", async (ctx) => {
+    const args = ctx.message?.text?.split(" ").slice(1) || [];
+
+    // 현재 상태 확인
+    if (args.length === 0) {
+      const configured = await isCalendarConfigured();
+      const hasCreds = await hasCredentials();
+
+      if (configured) {
+        // 오늘 일정 미리보기
+        try {
+          const events = await getTodayEvents();
+          const preview = events.length > 0
+            ? events.slice(0, 3).map(formatEvent).join("\n")
+            : "오늘 일정 없음";
+
+          await ctx.reply(
+            `📅 Google Calendar 연동됨!\n\n` +
+            `오늘 일정:\n${preview}\n\n` +
+            `"오늘 일정 뭐야?" 라고 물어보세요.`
+          );
+        } catch {
+          await ctx.reply(`📅 Google Calendar 연동됨!\n\n"오늘 일정 뭐야?" 라고 물어보세요.`);
+        }
+        return;
+      }
+
+      if (hasCreds) {
+        // credentials 있지만 인증 안됨
+        const authUrl = await getAuthUrl();
+        if (authUrl) {
+          await ctx.reply(
+            `📅 Google Calendar 인증 필요\n\n` +
+            `아래 링크에서 인증해주세요:\n${authUrl}\n\n` +
+            `인증 후 자동으로 연결됩니다.`
+          );
+
+          // 백그라운드에서 인증 서버 시작
+          startAuthServer()
+            .then(async (code) => {
+              const success = await exchangeCodeForToken(code);
+              if (success) {
+                await ctx.reply("✅ Google Calendar 연동 완료!");
+              } else {
+                await ctx.reply("❌ 인증 실패. 다시 시도해주세요.");
+              }
+            })
+            .catch(() => {
+              // 타임아웃 등
+            });
+        }
+        return;
+      }
+
+      // 설정 안내
+      await ctx.reply(
+        `📅 Google Calendar 설정\n\n` +
+        `1. Google Cloud Console 접속\n` +
+        `   console.cloud.google.com\n\n` +
+        `2. 프로젝트 생성 → Calendar API 활성화\n\n` +
+        `3. OAuth 동의 화면 설정\n` +
+        `   - 앱 이름: CompanionBot\n` +
+        `   - 범위: calendar.readonly, calendar.events\n\n` +
+        `4. 사용자 인증 정보 → OAuth 클라이언트 ID\n` +
+        `   - 유형: 데스크톱 앱\n` +
+        `   - 리디렉션 URI: http://localhost:3847/oauth2callback\n\n` +
+        `5. 클라이언트 ID와 Secret 복사 후:\n` +
+        `/calendar_setup CLIENT_ID CLIENT_SECRET`
+      );
+      return;
+    }
+
+    // credentials 설정
+    if (args.length === 2) {
+      const [clientId, clientSecret] = args;
+      await setCredentials(clientId, clientSecret);
+
+      const authUrl = await getAuthUrl();
+      if (authUrl) {
+        await ctx.reply(
+          `✅ Credentials 저장됨!\n\n` +
+          `아래 링크에서 인증해주세요:\n${authUrl}\n\n` +
+          `인증 완료 후 자동으로 연결됩니다.`
+        );
+
+        // 인증 서버 시작
+        startAuthServer()
+          .then(async (code) => {
+            const success = await exchangeCodeForToken(code);
+            if (success) {
+              await ctx.reply("✅ Google Calendar 연동 완료!");
+            } else {
+              await ctx.reply("❌ 인증 실패. 다시 시도해주세요.");
+            }
+          })
+          .catch(() => {
+            // 타임아웃
+          });
+      }
+      return;
+    }
+
+    await ctx.reply("사용법: /calendar_setup CLIENT_ID CLIENT_SECRET");
+  });
+
+  // /calendar 명령어 - 오늘 일정 보기
+  bot.command("calendar", async (ctx) => {
+    const configured = await isCalendarConfigured();
+
+    if (!configured) {
+      await ctx.reply("📅 캘린더가 연동되지 않았어요.\n/calendar_setup 으로 설정해주세요.");
+      return;
+    }
+
+    try {
+      const events = await getTodayEvents();
+
+      if (events.length === 0) {
+        await ctx.reply("📅 오늘 일정이 없어요!");
+        return;
+      }
+
+      let message = "📅 오늘 일정\n\n";
+      for (const event of events) {
+        message += `• ${formatEvent(event)}\n`;
+      }
+
+      await ctx.reply(message);
+    } catch (error) {
+      console.error("Calendar error:", error);
+      await ctx.reply("캘린더 조회 중 오류가 발생했어요.");
+    }
+  });
+
+  // /briefing 명령어 - 토글 방식
+  bot.command("briefing", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const config = await getBriefingConfig(chatId);
+
+    if (!config || !config.enabled) {
+      // 꺼져있으면 → 켜기
+      await setBriefingConfig(chatId, true, "08:00", "Seoul");
+      await ctx.reply(
+        "☀️ 일일 브리핑 ON\n\n" +
+        "매일 08:00에 날씨와 일정을 알려드릴게요.\n" +
+        `"아침 9시에 브리핑"으로 시간 변경 가능`
+      );
+    } else {
+      // 켜져있으면 → 상태 표시
+      await ctx.reply(
+        `☀️ 일일 브리핑 활성화 중\n\n` +
+        `시간: ${config.time} / 도시: ${config.city}\n\n` +
+        `"브리핑 꺼줘"로 끄거나\n` +
+        `"지금 브리핑 해줘"로 바로 받기`
+      );
+    }
+  });
+
+  // /heartbeat 명령어 - 토글 방식
+  bot.command("heartbeat", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const config = await getHeartbeatConfig(chatId);
+
+    if (!config || !config.enabled) {
+      // 꺼져있으면 → 켜기
+      await setHeartbeatConfig(chatId, true, 30);
+      await ctx.reply(
+        "💓 Heartbeat ON\n\n" +
+        "30분마다 체크할게요.\n" +
+        "HEARTBEAT.md를 편집해서 체크 항목을 설정하세요."
+      );
+    } else {
+      // 켜져있으면 → 상태 표시
+      const intervalMin = Math.floor(config.intervalMs / 60000);
+      await ctx.reply(
+        `💓 Heartbeat 활성화 중 (${intervalMin}분 간격)\n\n` +
+        `"하트비트 꺼줘"로 끄거나\n` +
+        `"10분마다 체크해줘"로 간격 변경 가능`
+      );
+    }
+  });
+}

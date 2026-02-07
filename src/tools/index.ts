@@ -1,4 +1,5 @@
 import * as fs from "fs/promises";
+import * as fsSync from "fs";
 import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -26,6 +27,18 @@ import {
   formatEvent,
   parseDateExpression,
 } from "../calendar/index.js";
+import {
+  setHeartbeatConfig,
+  getHeartbeatConfig,
+  disableHeartbeat,
+  runHeartbeatNow,
+} from "../heartbeat/index.js";
+import {
+  setBriefingConfig,
+  getBriefingConfig,
+  disableBriefing,
+  sendBriefingNow,
+} from "../briefing/index.js";
 
 const execAsync = promisify(exec);
 
@@ -38,10 +51,53 @@ function getAllowedPaths(): string[] {
   ];
 }
 
+// 위험한 파일 패턴
+const DANGEROUS_PATTERNS = [
+  /\.bashrc$/,
+  /\.zshrc$/,
+  /\.bash_profile$/,
+  /\.profile$/,
+  /\.ssh\//,
+  /\.git\/hooks\//,
+  /\.git\/config$/,
+  /\.env$/,
+  /\.npmrc$/,
+];
+
 function isPathAllowed(targetPath: string): boolean {
-  const resolved = path.resolve(targetPath);
-  const allowedPaths = getAllowedPaths();
-  return allowedPaths.some((allowed) => resolved.startsWith(allowed));
+  try {
+    const resolved = path.resolve(targetPath);
+
+    // 위험한 파일 패턴 차단
+    if (DANGEROUS_PATTERNS.some(p => p.test(resolved))) {
+      return false;
+    }
+
+    // 심볼릭 링크 해제하여 실제 경로 확인
+    let realPath: string;
+    try {
+      realPath = fsSync.realpathSync(resolved);
+    } catch {
+      // 파일이 아직 없으면 (write_file) 부모 디렉토리 확인
+      const parentDir = path.dirname(resolved);
+      try {
+        realPath = path.join(fsSync.realpathSync(parentDir), path.basename(resolved));
+      } catch {
+        realPath = resolved;
+      }
+    }
+
+    const allowedPaths = getAllowedPaths();
+
+    // 정확한 경로 구분자로 비교 (startsWith만으로는 /Users/hwai/DocumentsEvil 같은 경로 통과)
+    return allowedPaths.some((allowed) => {
+      const normalizedAllowed = path.resolve(allowed);
+      return realPath === normalizedAllowed ||
+             realPath.startsWith(normalizedAllowed + path.sep);
+    });
+  } catch {
+    return false;
+  }
 }
 
 // Tool 정의 (Claude API 형식)
@@ -305,6 +361,76 @@ Examples:
       required: ["event_id"],
     },
   },
+  {
+    name: "control_heartbeat",
+    description: `Control the heartbeat feature. Heartbeat periodically checks a checklist and notifies the user if something needs attention.
+
+Use this when the user says things like:
+- "하트비트 켜줘/꺼줘" (turn on/off)
+- "10분마다 체크해줘" (set interval)
+- "하트비트 상태 알려줘" (check status)`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["on", "off", "status"],
+          description: "Action to perform",
+        },
+        interval_minutes: {
+          type: "number",
+          description: "Check interval in minutes (5-1440). Only used with 'on' action.",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "run_heartbeat_check",
+    description: "Run heartbeat check immediately. Use when user asks to check now.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "control_briefing",
+    description: `Control the daily briefing feature. Sends weather and schedule every morning.
+
+Use this when the user says things like:
+- "브리핑 켜줘/꺼줘" (turn on/off)
+- "아침 9시에 브리핑 해줘" (set time)
+- "브리핑 상태" (check status)`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["on", "off", "status"],
+          description: "Action to perform",
+        },
+        time: {
+          type: "string",
+          description: "Time in HH:MM format (e.g., '08:00', '09:30'). Only used with 'on' action.",
+        },
+        city: {
+          type: "string",
+          description: "City for weather (e.g., 'Seoul', 'Tokyo'). Only used with 'on' action.",
+        },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "send_briefing_now",
+    description: "Send briefing immediately. Use when user asks for briefing right now.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // Tool 실행 함수
@@ -350,17 +476,42 @@ export async function executeTool(
         const command = input.command as string;
         const cwd = (input.cwd as string) || "/Users/hwai/Documents";
 
-        // 위험한 명령어 차단
-        const dangerous = ["rm -rf", "sudo", "chmod", "chown", "> /dev", "mkfs"];
-        if (dangerous.some((d) => command.includes(d))) {
-          return `Error: Dangerous command blocked.`;
+        // 화이트리스트 방식: 허용된 명령어만 실행
+        const ALLOWED_COMMANDS = [
+          "git", "npm", "npx", "node", "ls", "pwd", "cat", "head", "tail",
+          "grep", "find", "wc", "sort", "uniq", "diff", "echo", "date",
+          "which", "env", "printenv"
+        ];
+
+        // 명령어 체이닝/치환 차단 (;, &&, ||, |, `, $())
+        if (/[;&|`]|\$\(/.test(command)) {
+          return `Error: Command chaining and substitution not allowed.`;
         }
 
-        const { stdout, stderr } = await execAsync(command, {
-          cwd,
-          timeout: 30000,
-        });
-        return stdout || stderr || "Command executed (no output)";
+        // 첫 번째 명령어 추출
+        const parts = command.trim().split(/\s+/);
+        const cmd = parts[0];
+
+        if (!ALLOWED_COMMANDS.includes(cmd)) {
+          return `Error: Command '${cmd}' not in allowed list. Allowed: ${ALLOWED_COMMANDS.join(", ")}`;
+        }
+
+        // 위험한 인자 차단
+        const dangerousArgs = ["--force", "-rf", "--hard", "--no-preserve-root"];
+        if (dangerousArgs.some(arg => parts.includes(arg))) {
+          return `Error: Dangerous argument detected.`;
+        }
+
+        try {
+          const { stdout, stderr } = await execAsync(command, {
+            cwd,
+            timeout: 30000,
+            env: { ...process.env, ANTHROPIC_API_KEY: undefined }, // API 키 숨김
+          });
+          return stdout || stderr || "Command executed (no output)";
+        } catch (error) {
+          return `Error: ${error instanceof Error ? error.message : String(error)}`;
+        }
       }
 
       case "change_model": {
@@ -604,6 +755,94 @@ export async function executeTool(
         }
       }
 
+      case "control_heartbeat": {
+        const chatId = getCurrentChatId();
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        const action = input.action as string;
+        const intervalMinutes = (input.interval_minutes as number) || 30;
+
+        switch (action) {
+          case "on": {
+            const interval = Math.max(5, Math.min(1440, intervalMinutes));
+            await setHeartbeatConfig(chatId, true, interval);
+            return `Heartbeat enabled! Checking every ${interval} minutes.`;
+          }
+          case "off": {
+            await disableHeartbeat(chatId);
+            return "Heartbeat disabled.";
+          }
+          case "status": {
+            const config = await getHeartbeatConfig(chatId);
+            if (!config || !config.enabled) {
+              return "Heartbeat is currently disabled.";
+            }
+            const intervalMin = Math.floor(config.intervalMs / 60000);
+            const lastCheck = new Date(config.lastCheckAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+            return `Heartbeat is enabled. Interval: ${intervalMin} minutes. Last check: ${lastCheck}`;
+          }
+          default:
+            return "Error: Invalid action";
+        }
+      }
+
+      case "run_heartbeat_check": {
+        const chatId = getCurrentChatId();
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        const messageSent = await runHeartbeatNow(chatId);
+        if (messageSent) {
+          return "Heartbeat check complete. A notification was sent.";
+        } else {
+          return "Heartbeat check complete. Nothing to report.";
+        }
+      }
+
+      case "control_briefing": {
+        const chatId = getCurrentChatId();
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        const action = input.action as string;
+        const time = (input.time as string) || "08:00";
+        const city = (input.city as string) || "Seoul";
+
+        switch (action) {
+          case "on": {
+            await setBriefingConfig(chatId, true, time, city);
+            return `Daily briefing enabled! Will send at ${time} (${city}).`;
+          }
+          case "off": {
+            await disableBriefing(chatId);
+            return "Daily briefing disabled.";
+          }
+          case "status": {
+            const config = await getBriefingConfig(chatId);
+            if (!config || !config.enabled) {
+              return "Daily briefing is currently disabled.";
+            }
+            return `Daily briefing is enabled. Time: ${config.time}, City: ${config.city}`;
+          }
+          default:
+            return "Error: Invalid action";
+        }
+      }
+
+      case "send_briefing_now": {
+        const chatId = getCurrentChatId();
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        await sendBriefingNow(chatId);
+        return "Briefing sent!";
+      }
+
       default:
         return `Error: Unknown tool: ${name}`;
     }
@@ -647,6 +886,14 @@ export function getToolsDescription(modelId: ModelId): string {
 - get_calendar_events: 일정 조회 (today, tomorrow, week)
 - add_calendar_event: 일정 추가
 - delete_calendar_event: 일정 삭제
+
+## Heartbeat
+- control_heartbeat: 하트비트 on/off/상태 확인, 간격 설정
+- run_heartbeat_check: 지금 바로 체크
+
+## 브리핑
+- control_briefing: 일일 브리핑 on/off/상태, 시간/도시 설정
+- send_briefing_now: 지금 바로 브리핑
 
 ## 온보딩
 - save_persona: 페르소나 설정 저장 (온보딩 완료 시)

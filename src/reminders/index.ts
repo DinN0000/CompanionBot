@@ -245,3 +245,12 @@ export function parseTimeExpression(expr: string): Date | null {
 
   return null;
 }
+
+// 모든 스케줄 정리 (graceful shutdown)
+export function cleanupReminders(): void {
+  for (const [id, task] of activeSchedules) {
+    task.stop();
+  }
+  activeSchedules.clear();
+  console.log("[Reminder] Cleanup complete");
+}

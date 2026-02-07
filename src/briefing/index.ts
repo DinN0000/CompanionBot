@@ -241,3 +241,12 @@ export async function sendBriefingNow(chatId: number): Promise<boolean> {
   await executeBriefing(config);
   return true;
 }
+
+// 모든 스케줄 정리 (graceful shutdown)
+export function cleanupBriefings(): void {
+  for (const [chatId, job] of activeJobs) {
+    job.stop();
+  }
+  activeJobs.clear();
+  console.log("[Briefing] Cleanup complete");
+}

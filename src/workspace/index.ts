@@ -5,6 +5,7 @@ export {
   getMemoryDirPath,
   getDailyMemoryPath,
   getTemplatesPath,
+  getCanvasPath,
   WORKSPACE_FILES,
   type WorkspaceFile,
 } from "./paths.js";

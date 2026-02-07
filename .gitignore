@@ -17,3 +17,16 @@ data/sessions/*.jsonl
 # IDE
 .idea/
 .vscode/
+
+# npm
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test
+coverage/
+
+# Local
+*.local

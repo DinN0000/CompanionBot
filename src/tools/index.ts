@@ -10,6 +10,13 @@ import {
   appendToMemory,
   deleteBootstrap,
 } from "../workspace/index.js";
+import { getSecret } from "../config/secrets.js";
+import {
+  createReminder,
+  deleteReminder,
+  getReminders,
+  parseTimeExpression,
+} from "../reminders/index.js";
 
 const execAsync = promisify(exec);
 
@@ -164,6 +171,71 @@ Guidelines:
       required: ["identity", "soul", "user"],
     },
   },
+  {
+    name: "get_weather",
+    description: "Get current weather for a location. Use when the user asks about weather.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        city: {
+          type: "string",
+          description: "City name (e.g., 'Seoul', 'Tokyo', 'New York')",
+        },
+        country: {
+          type: "string",
+          description: "Country code (optional, e.g., 'KR', 'JP', 'US')",
+        },
+      },
+      required: ["city"],
+    },
+  },
+  {
+    name: "set_reminder",
+    description: `Set a reminder for the user. Use when the user asks to be reminded about something.
+
+Examples of time expressions you can parse:
+- "10분 후", "30분 뒤" (in X minutes)
+- "1시간 후", "2시간 뒤" (in X hours)
+- "내일 9시", "내일 오후 3시" (tomorrow at X)
+- "오후 5시", "오늘 저녁 7시" (today at X)`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        message: {
+          type: "string",
+          description: "The reminder message to send",
+        },
+        time_expr: {
+          type: "string",
+          description: "Time expression in Korean (e.g., '10분 후', '내일 9시', '오후 3시')",
+        },
+      },
+      required: ["message", "time_expr"],
+    },
+  },
+  {
+    name: "list_reminders",
+    description: "List all active reminders for the current user.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "cancel_reminder",
+    description: "Cancel a reminder by its ID.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        id: {
+          type: "string",
+          description: "The reminder ID to cancel",
+        },
+      },
+      required: ["id"],
+    },
+  },
 ];
 
 // Tool 실행 함수
@@ -266,6 +338,109 @@ export async function executeTool(
         return "Persona saved! BOOTSTRAP mode complete. I'm ready to chat with my new identity.";
       }
 
+      case "get_weather": {
+        const city = input.city as string;
+        const country = input.country as string | undefined;
+
+        const apiKey = await getSecret("openweathermap-api-key");
+        if (!apiKey) {
+          return "Error: OpenWeatherMap API key not configured. Ask user to set it up with /weather_setup command.";
+        }
+
+        const query = country ? `${city},${country}` : city;
+        const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(query)}&appid=${apiKey}&units=metric&lang=kr`;
+
+        try {
+          const response = await fetch(url);
+          const data = await response.json();
+
+          if (data.cod !== 200) {
+            return `Error: ${data.message || "City not found"}`;
+          }
+
+          const weather = {
+            city: data.name,
+            country: data.sys.country,
+            temp: Math.round(data.main.temp),
+            feels_like: Math.round(data.main.feels_like),
+            humidity: data.main.humidity,
+            description: data.weather[0].description,
+            wind: data.wind.speed,
+          };
+
+          return `Weather in ${weather.city}, ${weather.country}:
+- Condition: ${weather.description}
+- Temperature: ${weather.temp}°C (feels like ${weather.feels_like}°C)
+- Humidity: ${weather.humidity}%
+- Wind: ${weather.wind} m/s`;
+        } catch (error) {
+          return `Error fetching weather: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+
+      case "set_reminder": {
+        const message = input.message as string;
+        const timeExpr = input.time_expr as string;
+        const chatId = getCurrentChatId();
+
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        const scheduledTime = parseTimeExpression(timeExpr);
+        if (!scheduledTime) {
+          return `Error: Could not parse time expression "${timeExpr}". Try formats like "10분 후", "내일 9시", "오후 3시"`;
+        }
+
+        const reminder = await createReminder(chatId, message, scheduledTime);
+
+        const timeStr = scheduledTime.toLocaleString("ko-KR", {
+          month: "long",
+          day: "numeric",
+          hour: "numeric",
+          minute: "numeric",
+        });
+
+        return `Reminder set! I'll remind you "${message}" at ${timeStr}. (ID: ${reminder.id})`;
+      }
+
+      case "list_reminders": {
+        const chatId = getCurrentChatId();
+
+        if (!chatId) {
+          return "Error: No active chat session";
+        }
+
+        const reminders = await getReminders(chatId);
+
+        if (reminders.length === 0) {
+          return "No active reminders.";
+        }
+
+        const list = reminders.map((r) => {
+          const time = new Date(r.scheduledAt).toLocaleString("ko-KR", {
+            month: "long",
+            day: "numeric",
+            hour: "numeric",
+            minute: "numeric",
+          });
+          return `- [${r.id}] "${r.message}" at ${time}`;
+        });
+
+        return `Active reminders:\n${list.join("\n")}`;
+      }
+
+      case "cancel_reminder": {
+        const id = input.id as string;
+        const success = await deleteReminder(id);
+
+        if (success) {
+          return `Reminder ${id} cancelled.`;
+        } else {
+          return `Reminder ${id} not found.`;
+        }
+      }
+
       default:
         return `Error: Unknown tool: ${name}`;
     }
@@ -296,6 +471,14 @@ export function getToolsDescription(modelId: ModelId): string {
 
 ## 기억
 - save_memory: 중요한 정보 저장
+
+## 날씨
+- get_weather: 현재 날씨 조회 (도시명 필요)
+
+## 리마인더
+- set_reminder: 알림 설정 ("10분 후", "내일 9시" 등)
+- list_reminders: 활성 리마인더 목록
+- cancel_reminder: 리마인더 취소
 
 ## 온보딩
 - save_persona: 페르소나 설정 저장 (온보딩 완료 시)

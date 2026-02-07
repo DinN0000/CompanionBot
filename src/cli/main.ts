@@ -58,6 +58,29 @@ async function interactiveSetup(): Promise<boolean> {
     await setSecret("anthropic-api-key", apiKey);
     console.log("      ✓ 저장됨\n");
 
+    // 선택적 기능 설정
+    const setupOptional = await question(rl, "[선택] 추가 기능을 설정하시겠습니까? (y/n): ");
+
+    if (setupOptional.toLowerCase() === "y") {
+      console.log("");
+
+      // 날씨 기능
+      const useWeather = await question(rl, "      날씨 기능을 사용하시겠습니까? (y/n): ");
+
+      if (useWeather.toLowerCase() === "y") {
+        console.log("\n      OpenWeatherMap API Key가 필요합니다.");
+        console.log("      (https://openweathermap.org)\n");
+
+        const weatherKey = await question(rl, "      API Key: ");
+        if (weatherKey) {
+          await setSecret("openweathermap-api-key", weatherKey);
+          console.log("      ✓ 저장됨\n");
+        } else {
+          console.log("      → 건너뜀\n");
+        }
+      }
+    }
+
     rl.close();
     return true;
   } catch (error) {

@@ -17,6 +17,8 @@ import {
   type Workspace,
 } from "../workspace/index.js";
 import { getToolsDescription } from "../tools/index.js";
+import { getSecret, setSecret } from "../config/secrets.js";
+import { setBotInstance, restoreReminders, getReminders } from "../reminders/index.js";
 
 // 워크스페이스 캐시
 let cachedWorkspace: Workspace | null = null;
@@ -160,6 +162,10 @@ async function buildSystemPrompt(modelId: ModelId): Promise<string> {
 export function createBot(token: string): Bot {
   const bot = new Bot(token);
 
+  // 리마인더 시스템 초기화
+  setBotInstance(bot);
+  restoreReminders().catch((err) => console.error("Failed to restore reminders:", err));
+
   // 에러 핸들링
   bot.catch((err) => {
     console.error("Bot error:", err);
@@ -169,6 +175,7 @@ export function createBot(token: string): Bot {
   bot.api.setMyCommands([
     { command: "compact", description: "대화 정리하기" },
     { command: "memory", description: "최근 기억 보기" },
+    { command: "reminders", description: "알림 목록 보기" },
   ]).catch((err) => console.error("Failed to set commands:", err));
 
   // /start 명령어
@@ -317,6 +324,80 @@ export function createBot(token: string): Bot {
         `Available: sonnet, opus, haiku`
       );
     }
+  });
+
+  // /setup 명령어 - 추가 기능 설정 목록
+  bot.command("setup", async (ctx) => {
+    const weatherKey = await getSecret("openweathermap-api-key");
+
+    const features = [
+      {
+        name: "날씨",
+        command: "/weather_setup",
+        configured: !!weatherKey,
+      },
+      // 향후 추가 기능은 여기에 추가
+    ];
+
+    let message = "⚙️ 추가 기능 설정\n\n";
+
+    features.forEach((feature, index) => {
+      const status = feature.configured ? "✓ 설정됨" : "✗ 미설정";
+      message += `${index + 1}. ${feature.name} (${feature.command})\n`;
+      message += `   상태: ${status}\n\n`;
+    });
+
+    message += "설정하려면 각 명령어를 입력하세요.";
+
+    await ctx.reply(message);
+  });
+
+  // /weather_setup 명령어 - 날씨 API 키 설정
+  bot.command("weather_setup", async (ctx) => {
+    const arg = ctx.message?.text?.split(" ").slice(1).join(" ");
+
+    if (!arg) {
+      const hasKey = await getSecret("openweathermap-api-key");
+      await ctx.reply(
+        `날씨 API 설정\n\n` +
+        `상태: ${hasKey ? "✓ 설정됨" : "✗ 미설정"}\n\n` +
+        `설정 방법:\n` +
+        `1. https://openweathermap.org 가입\n` +
+        `2. API Keys에서 키 발급\n` +
+        `3. /weather_setup YOUR_API_KEY 입력`
+      );
+      return;
+    }
+
+    await setSecret("openweathermap-api-key", arg);
+    await ctx.reply("✓ 날씨 API 키가 설정되었습니다!");
+  });
+
+  // /reminders 명령어 - 알림 목록
+  bot.command("reminders", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const reminders = await getReminders(chatId);
+
+    if (reminders.length === 0) {
+      await ctx.reply("📭 설정된 알림이 없어요.\n\n\"10분 뒤에 알려줘\" 같이 말해보세요!");
+      return;
+    }
+
+    let message = "⏰ 알림 목록\n\n";
+
+    for (const r of reminders) {
+      const time = new Date(r.scheduledAt).toLocaleString("ko-KR", {
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "numeric",
+      });
+      message += `• ${r.message}\n  📅 ${time}\n  🔖 ID: ${r.id}\n\n`;
+    }
+
+    message += "취소하려면 \"리마인더 취소해줘\" 라고 말해주세요.";
+
+    await ctx.reply(message);
   });
 
   // 사진 메시지 처리

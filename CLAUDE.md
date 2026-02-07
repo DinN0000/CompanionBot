@@ -43,6 +43,8 @@ npm start
 - Telegram Bot Token 입력 요청
 - Anthropic API Key 입력 요청
 - `~/.companionbot/` 워크스페이스 생성
+- 추가 기능 설정 여부 확인 (선택)
+  - 날씨 API 키 설정 (OpenWeatherMap)
 - 봇 시작
 
 ### 4. PM2 설정 (선택)
@@ -63,7 +65,7 @@ pm2 save
 
 ### src/telegram/bot.ts
 - Telegram 메시지 핸들러
-- 명령어: /start, /compact, /memory, /model, /reset
+- 명령어: /start, /compact, /memory, /model, /reset, /setup, /weather_setup
 - 사진 메시지 → Claude Vision으로 분석
 - URL 감지 → cheerio로 파싱 후 요약
 
@@ -82,10 +84,11 @@ pm2 save
 - `change_model`: 모델 변경
 - `save_memory`: 일일 메모리 저장
 - `save_persona`: 온보딩 완료 시 페르소나 저장
+- `get_weather`: 도시명으로 현재 날씨 조회 (OpenWeatherMap API 사용)
 
 ### src/config/secrets.ts
 - OS 키체인에 시크릿 저장/로드 (keytar)
-- `telegram-token`, `anthropic-api-key`
+- `telegram-token`, `anthropic-api-key`, `openweathermap-api-key`
 
 ## 워크스페이스 구조
 

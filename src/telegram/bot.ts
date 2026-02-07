@@ -29,6 +29,14 @@ import {
   getTodayEvents,
   formatEvent,
 } from "../calendar/index.js";
+import {
+  setBriefingBot,
+  restoreBriefings,
+  setBriefingConfig,
+  getBriefingConfig,
+  disableBriefing,
+  sendBriefingNow,
+} from "../briefing/index.js";
 
 // 워크스페이스 캐시
 let cachedWorkspace: Workspace | null = null;
@@ -175,6 +183,10 @@ export function createBot(token: string): Bot {
   // 리마인더 시스템 초기화
   setBotInstance(bot);
   restoreReminders().catch((err) => console.error("Failed to restore reminders:", err));
+
+  // 일일 브리핑 초기화
+  setBriefingBot(bot);
+  restoreBriefings().catch((err) => console.error("Failed to restore briefings:", err));
 
   // 에러 핸들링
   bot.catch((err) => {
@@ -548,6 +560,90 @@ export function createBot(token: string): Bot {
       console.error("Calendar error:", error);
       await ctx.reply("캘린더 조회 중 오류가 발생했어요.");
     }
+  });
+
+  // /briefing 명령어 - 일일 브리핑 설정
+  bot.command("briefing", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const args = ctx.message?.text?.split(" ").slice(1) || [];
+
+    // 현재 설정 확인
+    if (args.length === 0) {
+      const config = await getBriefingConfig(chatId);
+
+      if (config && config.enabled) {
+        await ctx.reply(
+          `☀️ 일일 브리핑 설정\n\n` +
+          `상태: ✓ 활성화\n` +
+          `시간: ${config.time}\n` +
+          `도시: ${config.city}\n\n` +
+          `명령어:\n` +
+          `/briefing off - 끄기\n` +
+          `/briefing 09:00 - 시간 변경\n` +
+          `/briefing now - 지금 받기`
+        );
+      } else {
+        await ctx.reply(
+          `☀️ 일일 브리핑\n\n` +
+          `매일 아침 날씨와 일정을 알려드려요!\n\n` +
+          `설정:\n` +
+          `/briefing on - 켜기 (기본 8시)\n` +
+          `/briefing 09:00 - 9시로 설정\n` +
+          `/briefing 08:30 Seoul - 시간+도시 설정`
+        );
+      }
+      return;
+    }
+
+    const cmd = args[0].toLowerCase();
+
+    // 끄기
+    if (cmd === "off") {
+      await disableBriefing(chatId);
+      await ctx.reply("☀️ 일일 브리핑이 꺼졌어요.");
+      return;
+    }
+
+    // 지금 받기
+    if (cmd === "now") {
+      await ctx.reply("☀️ 브리핑 준비 중...");
+      await sendBriefingNow(chatId);
+      return;
+    }
+
+    // 켜기
+    if (cmd === "on") {
+      const config = await setBriefingConfig(chatId, true, "08:00", "Seoul");
+      await ctx.reply(
+        `☀️ 일일 브리핑이 켜졌어요!\n\n` +
+        `매일 ${config.time}에 알려드릴게요.\n` +
+        `/briefing now 로 미리보기 가능!`
+      );
+      return;
+    }
+
+    // 시간 설정 (HH:MM 형식)
+    const timeMatch = cmd.match(/^(\d{1,2}):(\d{2})$/);
+    if (timeMatch) {
+      const hour = parseInt(timeMatch[1]);
+      const minute = parseInt(timeMatch[2]);
+
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        const time = `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
+        const city = args[1] || "Seoul";
+
+        const config = await setBriefingConfig(chatId, true, time, city);
+        await ctx.reply(
+          `☀️ 일일 브리핑 설정 완료!\n\n` +
+          `시간: ${config.time}\n` +
+          `도시: ${config.city}\n\n` +
+          `/briefing now 로 미리보기!`
+        );
+        return;
+      }
+    }
+
+    await ctx.reply("사용법: /briefing on|off|now|HH:MM [도시]");
   });
 
   // 사진 메시지 처리

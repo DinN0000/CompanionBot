@@ -131,16 +131,18 @@ async function main() {
   const bot = createBot(token);
 
   // Graceful shutdown
-  function shutdown(): void {
+  async function shutdown(): Promise<void> {
     console.log("\n👋 봇을 종료합니다...");
     cleanupHeartbeats();
     cleanupBriefings();
     cleanupReminders();
-    bot.stop();
+    await bot.stop();
+    console.log("✓ 정상 종료됨");
+    process.exit(0);
   }
 
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", () => void shutdown());
+  process.once("SIGTERM", () => void shutdown());
 
   bot.start({
     onStart: (botInfo) => {

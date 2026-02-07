@@ -42,13 +42,26 @@ export async function chat(
     content: m.content,
   }));
 
-  let response = await client.messages.create({
-    model,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: apiMessages,
-    tools: tools,
-  });
+  let response;
+  try {
+    response = await client.messages.create({
+      model,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: apiMessages,
+      tools: tools,
+    });
+  } catch (error) {
+    if (error instanceof Anthropic.APIError) {
+      if (error.status === 429) {
+        throw new Error("API 요청이 너무 많아. 잠시 후 다시 시도해줘.");
+      }
+      if (error.status >= 500) {
+        throw new Error("AI 서버에 문제가 생겼어. 잠시 후 다시 시도해줘.");
+      }
+    }
+    throw error;
+  }
 
   // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복 (최대 10회)
   const MAX_TOOL_ITERATIONS = 10;
@@ -96,13 +109,25 @@ export async function chat(
     });
 
     // 다음 응답 요청
-    response = await client.messages.create({
-      model,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: apiMessages,
-      tools: tools,
-    });
+    try {
+      response = await client.messages.create({
+        model,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: apiMessages,
+        tools: tools,
+      });
+    } catch (error) {
+      if (error instanceof Anthropic.APIError) {
+        if (error.status === 429) {
+          throw new Error("API 요청이 너무 많아. 잠시 후 다시 시도해줘.");
+        }
+        if (error.status >= 500) {
+          throw new Error("AI 서버에 문제가 생겼어. 잠시 후 다시 시도해줘.");
+        }
+      }
+      throw error;
+    }
   }
 
   // 반복 횟수 초과 시 경고
@@ -116,5 +141,5 @@ export async function chat(
     (block): block is Anthropic.TextBlock => block.type === "text"
   );
 
-  return textBlock?.text ?? "";
+  return textBlock?.text ?? "응답을 생성하지 못했어. 다시 시도해줄래?";
 }

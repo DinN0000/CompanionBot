@@ -98,7 +98,10 @@ function scheduleReminder(reminder: Reminder): void {
   } else {
     // 일회성 리마인더 - setTimeout 사용
     const delay = scheduledTime.getTime() - now.getTime();
-    if (delay > 0) {
+    // setTimeout 최대 지연: 약 24.8일 (2^31-1 ms)
+    const MAX_TIMEOUT = 2147483647;
+
+    if (delay > 0 && delay <= MAX_TIMEOUT) {
       const timeoutId = setTimeout(() => {
         executeReminder(reminder);
         activeSchedules.delete(reminder.id);
@@ -109,6 +112,19 @@ function scheduleReminder(reminder: Reminder): void {
         stop: () => clearTimeout(timeoutId),
         start: () => {},
       } as cron.ScheduledTask);
+    } else if (delay > MAX_TIMEOUT) {
+      // 24일 이상은 매일 체크하여 재스케줄링
+      console.log(`[Reminder] ${reminder.id} is too far in future, will re-check daily`);
+      const dailyCheck = cron.schedule("0 0 * * *", () => {
+        const remaining = scheduledTime.getTime() - Date.now();
+        if (remaining <= MAX_TIMEOUT && remaining > 0) {
+          // 이제 setTimeout 범위 내이면 재스케줄링
+          dailyCheck.stop();
+          activeSchedules.delete(reminder.id);
+          scheduleReminder(reminder);
+        }
+      });
+      activeSchedules.set(reminder.id, dailyCheck);
     }
   }
 }

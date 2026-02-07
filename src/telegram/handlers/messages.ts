@@ -36,6 +36,13 @@ export function registerMessageHandlers(bot: Bot): void {
         return;
       }
 
+      // 파일 크기 제한 (10MB)
+      const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+      if (file.file_size && file.file_size > MAX_IMAGE_SIZE) {
+        await ctx.reply("사진이 너무 커. 10MB 이하로 보내줄래?");
+        return;
+      }
+
       // 파일 다운로드
       const fileUrl = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
       const response = await fetch(fileUrl);
@@ -84,6 +91,9 @@ export function registerMessageHandlers(bot: Bot): void {
   bot.on("message:text", async (ctx) => {
     const chatId = ctx.chat.id;
     const userMessage = ctx.message.text;
+
+    // 빈 메시지 무시
+    if (!userMessage.trim()) return;
 
     // 현재 chatId 설정 (도구에서 사용)
     setCurrentChatId(chatId);

@@ -6,6 +6,7 @@ import { promisify } from "util";
 import { randomUUID } from "crypto";
 import { MODELS, type ModelId } from "../ai/claude.js";
 import { getCurrentChatId, setModel, getModel } from "../session/state.js";
+// Note: getCurrentChatId uses AsyncLocalStorage - must be called within runWithChatId context
 import {
   getWorkspacePath,
   saveWorkspaceFile,
@@ -77,6 +78,27 @@ const sessions = new Map<string, ProcessSession>();
 // Output buffer 최대 크기 (라인 수)
 const MAX_OUTPUT_LINES = 1000;
 
+// 세션 정리 간격 및 TTL (메모리 누수 방지)
+const SESSION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10분마다 정리
+const SESSION_TTL_MS = 60 * 60 * 1000; // 완료된 세션 1시간 후 삭제
+
+// 완료된 세션 자동 정리 함수
+function cleanupStaleSessions(): void {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    // 완료/에러/종료된 세션만 정리
+    if (session.status !== "running" && session.endTime) {
+      const age = now - session.endTime.getTime();
+      if (age > SESSION_TTL_MS) {
+        sessions.delete(id);
+      }
+    }
+  }
+}
+
+// 주기적 세션 정리 시작
+setInterval(cleanupStaleSessions, SESSION_CLEANUP_INTERVAL_MS);
+
 function appendOutput(session: ProcessSession, data: string) {
   const lines = data.split("\n");
   session.outputBuffer.push(...lines);
@@ -99,6 +121,46 @@ function getAllowedPaths(): string[] {
 }
 
 // 위험한 파일 패턴
+// SSRF 방지: 사설 IP 체크
+function isPrivateIP(hostname: string): boolean {
+  // IPv4 사설 IP 패턴
+  const privateIPv4Patterns = [
+    /^127\./,                           // 127.0.0.0/8 loopback
+    /^10\./,                            // 10.0.0.0/8
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./,  // 172.16.0.0/12
+    /^192\.168\./,                      // 192.168.0.0/16
+    /^0\./,                             // 0.0.0.0/8
+    /^169\.254\./,                      // link-local
+  ];
+  
+  // IPv6 사설/특수 주소
+  const privateIPv6Patterns = [
+    /^::1$/,                            // loopback
+    /^fe80:/i,                          // link-local
+    /^fd[0-9a-f]{2}:/i,                // unique local (fd00::/8)
+    /^fc[0-9a-f]{2}:/i,                // unique local (fc00::/7)
+    /^::ffff:(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)/i,  // IPv4-mapped
+  ];
+  
+  // localhost 체크
+  if (hostname === 'localhost' || hostname === 'localhost.localdomain') {
+    return true;
+  }
+  
+  // IPv4 체크
+  if (privateIPv4Patterns.some(p => p.test(hostname))) {
+    return true;
+  }
+  
+  // IPv6 체크 (브라켓 제거)
+  const ipv6 = hostname.replace(/^\[|\]$/g, '');
+  if (privateIPv6Patterns.some(p => p.test(ipv6))) {
+    return true;
+  }
+  
+  return false;
+}
+
 const DANGEROUS_PATTERNS = [
   /\.bashrc$/,
   /\.zshrc$/,
@@ -112,6 +174,12 @@ const DANGEROUS_PATTERNS = [
 ];
 
 function isPathAllowed(targetPath: string): boolean {
+  // ⚠️ TOCTOU (Time-of-check to time-of-use) 주의:
+  // realpathSync() 호출과 실제 파일 작업 사이에 심볼릭 링크가 변경될 수 있음.
+  // 완전한 방지를 위해서는 O_NOFOLLOW 플래그로 파일을 열어야 하지만,
+  // Node.js fs API에서는 제한적으로만 지원됨 (fs.open의 O_NOFOLLOW 미지원).
+  // 현재 구현은 기본적인 심볼릭 링크 해석을 통한 검증만 수행.
+  // 높은 보안이 필요한 환경에서는 chroot/namespace 격리를 권장.
   try {
     const resolved = path.resolve(targetPath);
 
@@ -130,7 +198,8 @@ function isPathAllowed(targetPath: string): boolean {
       try {
         realPath = path.join(fsSync.realpathSync(parentDir), path.basename(resolved));
       } catch {
-        realPath = resolved;
+        // 부모 디렉토리도 resolve 실패 시 거부 (존재하지 않거나 접근 불가)
+        return false;
       }
     }
 
@@ -143,6 +212,7 @@ function isPathAllowed(targetPath: string): boolean {
              realPath.startsWith(normalizedAllowed + path.sep);
     });
   } catch {
+    // 어떤 예외든 검증 실패로 처리 (fail-safe)
     return false;
   }
 }
@@ -850,9 +920,9 @@ export async function executeTool(
           "which", "env", "printenv"
         ];
 
-        // 명령어 체이닝/치환 차단 (;, &&, ||, |, `, $(), ${})
-        if (/[;&|`]|\$\(|\$\{/.test(command)) {
-          return `Error: Command chaining and substitution not allowed.`;
+        // 명령어 체이닝/치환/리디렉션 차단 (;, &&, ||, |, `, $(), ${}, 개행, >, <)
+        if (/[;&|`\n\r]|\$\(|\$\{|>>|>|</.test(command)) {
+          return `Error: Command chaining, substitution, and redirection not allowed.`;
         }
 
         // 첫 번째 명령어 추출
@@ -1473,6 +1543,16 @@ ${"─".repeat(40)}`;
 
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
           return "Error: URL must start with http:// or https://";
+        }
+
+        // SSRF 방지: 사설 IP 차단
+        try {
+          const parsedUrl = new URL(url);
+          if (isPrivateIP(parsedUrl.hostname)) {
+            return "Error: Access to private/internal addresses is not allowed.";
+          }
+        } catch {
+          return "Error: Invalid URL format.";
         }
 
         try {

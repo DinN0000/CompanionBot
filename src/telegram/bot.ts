@@ -1,4 +1,5 @@
 import { Bot } from "grammy";
+import { limit } from "@grammyjs/ratelimiter";
 import { setBotInstance, restoreReminders } from "../reminders/index.js";
 import { setBriefingBot, restoreBriefings } from "../briefing/index.js";
 import { setHeartbeatBot, restoreHeartbeats } from "../heartbeat/index.js";
@@ -41,6 +42,15 @@ export function createBot(token: string): Bot {
   restoreCronJobs().catch((err) =>
     console.error("Failed to restore cron jobs:", err)
   );
+
+  // Rate limiting - 1분에 10개 메시지
+  bot.use(limit({
+    timeFrame: 60000, // 1분
+    limit: 10,
+    onLimitExceeded: async (ctx) => {
+      await ctx.reply("⚠️ 너무 빠르게 메시지를 보내고 있어요. 잠시 후 다시 시도해주세요.");
+    },
+  }));
 
   // 에러 핸들링
   bot.catch((err) => {

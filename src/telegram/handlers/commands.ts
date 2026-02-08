@@ -1,11 +1,34 @@
 import { Bot } from "grammy";
+import { randomBytes } from "crypto";
 import { chat, MODELS, type ModelId } from "../../ai/claude.js";
+
+// Reset 토큰 관리 (1분 만료)
+const resetTokens = new Map<number, { token: string; expiresAt: number }>();
+
+function generateResetToken(chatId: number): string {
+  const token = randomBytes(8).toString("hex");
+  const expiresAt = Date.now() + 60000; // 1분 후 만료
+  resetTokens.set(chatId, { token, expiresAt });
+  return token;
+}
+
+function validateResetToken(chatId: number, token: string): boolean {
+  const stored = resetTokens.get(chatId);
+  if (!stored) return false;
+  if (Date.now() > stored.expiresAt) {
+    resetTokens.delete(chatId);
+    return false;
+  }
+  if (stored.token !== token) return false;
+  resetTokens.delete(chatId); // 사용 후 삭제
+  return true;
+}
 import {
   getHistory,
   clearHistory,
   getModel,
   setModel,
-  setCurrentChatId,
+  runWithChatId,
 } from "../../session/state.js";
 import {
   hasBootstrap,
@@ -48,7 +71,6 @@ export function registerCommands(bot: Bot): void {
     const chatId = ctx.chat.id;
     clearHistory(chatId);
     setModel(chatId, "sonnet");
-    setCurrentChatId(chatId);
 
     // 워크스페이스 캐시 무효화
     invalidateWorkspaceCache();
@@ -57,30 +79,32 @@ export function registerCommands(bot: Bot): void {
     const isBootstrap = await hasBootstrap();
 
     if (isBootstrap) {
-      // 온보딩 모드: 봇이 먼저 인사
-      await ctx.replyWithChatAction("typing");
+      // 온보딩 모드: 봇이 먼저 인사 (runWithChatId로 감싸서 도구가 chatId 접근 가능)
+      await runWithChatId(chatId, async () => {
+        await ctx.replyWithChatAction("typing");
 
-      const history = getHistory(chatId);
-      const modelId = getModel(chatId);
-      const systemPrompt = await buildSystemPrompt(modelId);
+        const history = getHistory(chatId);
+        const modelId = getModel(chatId);
+        const systemPrompt = await buildSystemPrompt(modelId);
 
-      // 첫 메시지 생성 요청
-      history.push({
-        role: "user",
-        content: "[시스템: 사용자가 /start를 눌렀습니다. 온보딩을 시작하세요.]",
+        // 첫 메시지 생성 요청
+        history.push({
+          role: "user",
+          content: "[시스템: 사용자가 /start를 눌렀습니다. 온보딩을 시작하세요.]",
+        });
+
+        try {
+          const response = await chat(history, systemPrompt, modelId);
+          history.push({ role: "assistant", content: response });
+          await ctx.reply(response);
+        } catch (error) {
+          console.error("Bootstrap start error:", error);
+          await ctx.reply(
+            "안녕! 반가워. 난 방금 태어난 AI야. 아직 이름도 없어.\n" +
+            "너와 함께 나를 만들어가고 싶은데... 혹시 이름 지어줄 수 있어?"
+          );
+        }
       });
-
-      try {
-        const response = await chat(history, systemPrompt, modelId);
-        history.push({ role: "assistant", content: response });
-        await ctx.reply(response);
-      } catch (error) {
-        console.error("Bootstrap start error:", error);
-        await ctx.reply(
-          "안녕! 반가워. 난 방금 태어난 AI야. 아직 이름도 없어.\n" +
-          "너와 함께 나를 만들어가고 싶은데... 혹시 이름 지어줄 수 있어?"
-        );
-      }
     } else {
       // 일반 모드
       const workspace = await getWorkspace();
@@ -96,16 +120,29 @@ export function registerCommands(bot: Bot): void {
     }
   });
 
-  // /reset 명령어 - 페르소나 리셋
+  // /reset 명령어 - 페르소나 리셋 (토큰 기반)
   bot.command("reset", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const token = generateResetToken(chatId);
+    
     await ctx.reply(
-      "정말 페르소나를 리셋할까요?\n" +
+      "⚠️ 정말 페르소나를 리셋할까요?\n" +
       "모든 설정이 초기화되고 온보딩을 다시 진행합니다.\n\n" +
-      "확인하려면 /confirm_reset 을 입력하세요."
+      `확인하려면 /confirm_reset_${token} 을 입력하세요.\n` +
+      "(1분 후 만료)"
     );
   });
 
-  bot.command("confirm_reset", async (ctx) => {
+  // /confirm_reset_<token> 패턴 매칭
+  bot.hears(/^\/confirm_reset_([a-f0-9]+)$/, async (ctx) => {
+    const chatId = ctx.chat.id;
+    const token = ctx.match[1];
+    
+    if (!validateResetToken(chatId, token)) {
+      await ctx.reply("❌ 유효하지 않거나 만료된 토큰입니다.\n/reset 으로 다시 시도하세요.");
+      return;
+    }
+    
     const { initWorkspace } = await import("../../workspace/index.js");
     const { rm } = await import("fs/promises");
 
@@ -113,7 +150,7 @@ export function registerCommands(bot: Bot): void {
       await rm(getWorkspacePath(), { recursive: true, force: true });
       await initWorkspace();
       invalidateWorkspaceCache();
-      clearHistory(ctx.chat.id);
+      clearHistory(chatId);
 
       await ctx.reply(
         "✓ 페르소나가 리셋되었습니다.\n" +
@@ -394,13 +431,27 @@ export function registerCommands(bot: Bot): void {
         `설정 방법:\n` +
         `1. https://openweathermap.org 가입\n` +
         `2. API Keys에서 키 발급\n` +
-        `3. /weather_setup YOUR_API_KEY 입력`
+        `3. /weather_setup YOUR_API_KEY 입력\n\n` +
+        `⚠️ DM에서만 설정 가능합니다 (보안)`
       );
       return;
     }
 
+    // DM에서만 설정 가능
+    if (ctx.chat.type !== "private") {
+      await ctx.reply("⚠️ API 키는 DM에서만 설정할 수 있어요.\n보안을 위해 개인 채팅으로 보내주세요.");
+      return;
+    }
+
+    // 메시지 삭제 (API 키 노출 방지)
+    try {
+      await ctx.api.deleteMessage(ctx.chat.id, ctx.message!.message_id);
+    } catch {
+      // 삭제 실패해도 계속 진행
+    }
+
     await setSecret("openweathermap-api-key", arg);
-    await ctx.reply("✓ 날씨 API 키가 설정되었습니다!");
+    await ctx.reply("✓ 날씨 API 키가 설정되었습니다! (보안을 위해 메시지 삭제됨)");
   });
 
   // /reminders 명령어 - 알림 목록
@@ -498,20 +549,35 @@ export function registerCommands(bot: Bot): void {
         `   - 유형: 데스크톱 앱\n` +
         `   - 리디렉션 URI: http://localhost:3847/oauth2callback\n\n` +
         `5. 클라이언트 ID와 Secret 복사 후:\n` +
-        `/calendar_setup CLIENT_ID CLIENT_SECRET`
+        `/calendar_setup CLIENT_ID CLIENT_SECRET\n\n` +
+        `⚠️ DM에서만 설정 가능합니다 (보안)`
       );
+      return;
+    }
+
+    // DM에서만 설정 가능
+    if (ctx.chat.type !== "private") {
+      await ctx.reply("⚠️ API 키는 DM에서만 설정할 수 있어요.\n보안을 위해 개인 채팅으로 보내주세요.");
       return;
     }
 
     // credentials 설정
     if (args.length === 2) {
       const [clientId, clientSecret] = args;
+
+      // 메시지 삭제 (credentials 노출 방지)
+      try {
+        await ctx.api.deleteMessage(ctx.chat.id, ctx.message!.message_id);
+      } catch {
+        // 삭제 실패해도 계속 진행
+      }
+
       await setCredentials(clientId, clientSecret);
 
       const authUrl = await getAuthUrl();
       if (authUrl) {
         await ctx.reply(
-          `✅ Credentials 저장됨!\n\n` +
+          `✅ Credentials 저장됨! (보안을 위해 메시지 삭제됨)\n\n` +
           `아래 링크에서 인증해주세요:\n${authUrl}\n\n` +
           `인증 완료 후 자동으로 연결됩니다.`
         );

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "async_hooks";
 import type { ModelId } from "../ai/claude.js";
 import type { Message } from "../ai/claude.js";
 
@@ -13,6 +14,9 @@ type SessionData = {
 
 // 세션별 상태 저장
 const sessions = new Map<number, SessionData>();
+
+// AsyncLocalStorage for chatId context
+const chatIdStorage = new AsyncLocalStorage<number>();
 
 function getSession(chatId: number): SessionData {
   const existing = sessions.get(chatId);
@@ -73,15 +77,20 @@ export function setModel(chatId: number, modelId: ModelId): void {
   getSession(chatId).model = modelId;
 }
 
-// 현재 활성 chatId (도구에서 사용)
-let currentChatId: number | null = null;
-
-export function setCurrentChatId(chatId: number): void {
-  currentChatId = chatId;
+/**
+ * Run a function with chatId context using AsyncLocalStorage.
+ * All code inside the callback can access the chatId via getCurrentChatId().
+ */
+export function runWithChatId<T>(chatId: number, fn: () => T): T {
+  return chatIdStorage.run(chatId, fn);
 }
 
+/**
+ * Get the current chatId from AsyncLocalStorage context.
+ * Returns null if called outside of runWithChatId().
+ */
 export function getCurrentChatId(): number | null {
-  return currentChatId;
+  return chatIdStorage.getStore() ?? null;
 }
 
 // 세션 정리 (수동 호출용)

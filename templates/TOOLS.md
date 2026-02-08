@@ -1,20 +1,23 @@
-# 도구 설정
+# TOOLS.md - 도구 & 설정 노트
 
-이 파일은 나중에 도구를 커스터마이즈할 때 사용됩니다.
-현재는 기본 도구들이 활성화되어 있습니다.
+이 파일은 도구 사용에 대한 너만의 노트를 적는 곳이야.
 
-## 활성화된 도구
+## 자주 쓰는 경로
+- 작업 디렉토리: (프로젝트 경로)
+- 문서: (문서 경로)
 
-- 파일 작업 (read_file, write_file, list_directory)
-- 명령어 실행 (run_command)
-- 모델 변경 (change_model)
-- 메모리 저장 (save_memory)
-- 날씨 조회 (get_weather)
-- 리마인더 (set_reminder, list_reminders, cancel_reminder)
-- 캘린더 (get_calendar_events, add_calendar_event, delete_calendar_event)
-- 하트비트 (control_heartbeat, run_heartbeat_check)
-- 브리핑 (control_briefing, send_briefing_now)
+## API 설정 상태
+- 날씨: (설정됨/안됨)
+- 캘린더: (설정됨/안됨)
+- 웹 검색: (설정됨/안됨)
 
-## 커스텀 도구
+## 선호 설정
+- 기본 모델: sonnet
+- 리마인더 스타일: (어떻게 알려줄지)
 
-(나중에 추가)
+## 노트
+(도구 사용하면서 알게 된 것들)
+
+---
+
+스킬은 공유돼. 설정은 너만의 것. 분리해두면 스킬 업데이트해도 설정 안 잃어.

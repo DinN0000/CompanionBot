@@ -111,13 +111,35 @@ function appendOutput(session: ProcessSession, data: string) {
 // 홈 디렉토리
 const home = process.env.HOME || "";
 
-// 허용된 디렉토리 (보안을 위해 제한)
+// 허용된 디렉토리 설정
+// - COMPANIONBOT_FULL_ACCESS=true: 홈 디렉토리 전체 접근 (위험한 파일 패턴은 여전히 차단)
+// - COMPANIONBOT_ALLOWED_PATHS: 콜론(:)으로 구분된 추가 경로 (예: /tmp:/var/data)
+// - 기본값: ~/Documents, ~/projects, 워크스페이스
 function getAllowedPaths(): string[] {
-  return [
+  // 전체 접근 모드
+  if (process.env.COMPANIONBOT_FULL_ACCESS === "true") {
+    return [home];
+  }
+  
+  // 기본 경로
+  const paths = [
     path.join(home, "Documents"),
     path.join(home, "projects"),
-    getWorkspacePath(), // 워크스페이스 경로 추가
+    getWorkspacePath(),
   ];
+  
+  // 환경변수로 추가 경로 설정
+  const extraPaths = process.env.COMPANIONBOT_ALLOWED_PATHS;
+  if (extraPaths) {
+    const extras = extraPaths.split(":").filter(p => p.trim());
+    for (const p of extras) {
+      // ~ 확장
+      const expanded = p.startsWith("~") ? path.join(home, p.slice(1)) : p;
+      paths.push(expanded);
+    }
+  }
+  
+  return paths;
 }
 
 // 위험한 파일 패턴

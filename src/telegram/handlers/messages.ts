@@ -71,15 +71,21 @@ export function registerMessageHandlers(bot: Bot): void {
 
         history.push({ role: "user", content: imageContent });
 
-        const systemPrompt = await buildSystemPrompt(modelId, history);
-        const result = await chat(history, systemPrompt, modelId);
+        try {
+          const systemPrompt = await buildSystemPrompt(modelId, history);
+          const result = await chat(history, systemPrompt, modelId);
 
-        history.push({ role: "assistant", content: result });
+          history.push({ role: "assistant", content: result });
 
-        // 토큰 기반 히스토리 트리밍
-        trimHistoryByTokens(history);
+          // 토큰 기반 히스토리 트리밍
+          trimHistoryByTokens(history);
 
-        await ctx.reply(result);
+          await ctx.reply(result);
+        } catch (innerError) {
+          // 에러 시 방금 추가한 사용자 메시지 롤백 (히스토리 오염 방지)
+          history.pop();
+          throw innerError;
+        }
       } catch (error) {
         console.error("Photo error:", error);
         await ctx.reply("사진 분석 중 오류가 발생했어.");
@@ -140,6 +146,8 @@ export function registerMessageHandlers(bot: Bot): void {
 
         await ctx.reply(response);
       } catch (error) {
+        // 에러 시 방금 추가한 사용자 메시지 롤백 (히스토리 오염 방지)
+        history.pop();
         console.error("Chat error:", error);
         await ctx.reply("뭔가 잘못됐어. 다시 시도해줄래?");
       }

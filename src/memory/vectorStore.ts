@@ -25,6 +25,9 @@ let cachedChunks: MemoryChunk[] = [];
 let cacheTimestamp = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5분
 
+// 로딩 중복 방지용 Promise
+let loadingPromise: Promise<MemoryChunk[]> | null = null;
+
 /**
  * 텍스트를 적절한 크기의 청크로 분할합니다.
  */
@@ -66,16 +69,9 @@ function splitIntoChunks(text: string, source: string): MemoryChunk[] {
 }
 
 /**
- * 모든 메모리 파일을 로드하고 청크로 분할합니다.
+ * 내부 로드 로직 - 실제 파일 로드 수행
  */
-async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
-  const now = Date.now();
-  
-  // 캐시가 유효하면 반환
-  if (cachedChunks.length > 0 && now - cacheTimestamp < CACHE_TTL_MS) {
-    return cachedChunks;
-  }
-
+async function doLoadAllMemoryChunks(): Promise<MemoryChunk[]> {
   const chunks: MemoryChunk[] = [];
 
   // 1. 일별 메모리 파일 (최근 30일)
@@ -107,11 +103,37 @@ async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
     // 파일 없음 무시
   }
 
-  // 캐시 업데이트 (임베딩은 아직 없음)
-  cachedChunks = chunks;
-  cacheTimestamp = now;
-
   return chunks;
+}
+
+/**
+ * 모든 메모리 파일을 로드하고 청크로 분할합니다.
+ * 동시 요청 시 중복 로드를 방지합니다.
+ */
+export async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
+  const now = Date.now();
+  
+  // 캐시가 유효하면 반환
+  if (cachedChunks.length > 0 && now - cacheTimestamp < CACHE_TTL_MS) {
+    return cachedChunks;
+  }
+
+  // 이미 로딩 중이면 해당 Promise 반환 (중복 로드 방지)
+  if (loadingPromise) {
+    return loadingPromise;
+  }
+
+  // 새로 로드
+  loadingPromise = doLoadAllMemoryChunks();
+  try {
+    const chunks = await loadingPromise;
+    // 캐시 업데이트 (임베딩은 아직 없음)
+    cachedChunks = chunks;
+    cacheTimestamp = Date.now();
+    return chunks;
+  } finally {
+    loadingPromise = null;
+  }
 }
 
 /**
@@ -122,8 +144,8 @@ async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
  */
 export async function search(
   queryEmbedding: number[],
-  topK: number = 3,
-  minScore: number = 0.4
+  topK: number = 5,
+  minScore: number = 0.3
 ): Promise<SearchResult[]> {
   const chunks = await loadAllMemoryChunks();
   
@@ -167,6 +189,7 @@ export async function search(
 export function invalidateCache(): void {
   cachedChunks = [];
   cacheTimestamp = 0;
+  loadingPromise = null;
 }
 
 // 영속적 저장소용 인터페이스

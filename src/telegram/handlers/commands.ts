@@ -1,22 +1,7 @@
 import { Bot } from "grammy";
 import { randomBytes } from "crypto";
 import { chat, MODELS, type ModelId, type Message } from "../../ai/claude.js";
-
-// 토큰 추정 함수 (대략적: 한글 1자 ≈ 1-2 토큰, 영어 4자 ≈ 1 토큰)
-function estimateTokens(text: string): number {
-  const koreanChars = (text.match(/[\u3131-\uD79D]/g) || []).length;
-  const otherChars = text.length - koreanChars;
-  return Math.ceil(koreanChars * 1.5 + otherChars / 4);
-}
-
-function estimateMessagesTokens(messages: Message[]): number {
-  return messages.reduce((total, msg) => {
-    const content = typeof msg.content === "string" 
-      ? msg.content 
-      : JSON.stringify(msg.content);
-    return total + estimateTokens(content) + 4; // 4 for role overhead
-  }, 0);
-}
+import { estimateMessagesTokens } from "../../utils/tokens.js";
 
 // 대화 요약 생성 함수
 async function generateSummary(messages: Message[]): Promise<string> {

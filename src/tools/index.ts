@@ -875,6 +875,10 @@ Examples:
         limit: {
           type: "number",
           description: "Maximum number of results (default: 5)"
+        },
+        minScore: {
+          type: "number",
+          description: "Minimum similarity score 0-1 (default: 0.3). Lower = more results but less relevant."
         }
       },
       required: ["query"]
@@ -1817,9 +1821,10 @@ Next run: ${nextRunStr}`;
       case "memory_search": {
         const query = input.query as string;
         const limit = (input.limit as number) || 5;
+        const minScore = (input.minScore as number) || 0.3;
         
         const queryEmbedding = await embed(query);
-        const results = await search(queryEmbedding, limit);
+        const results = await search(queryEmbedding, limit, minScore);
         
         if (results.length === 0) {
           return "관련 기억을 찾지 못했어.";
@@ -1832,7 +1837,10 @@ Next run: ${nextRunStr}`;
 
       case "memory_reindex": {
         const result = await reindexAll();
-        return `리인덱싱 완료: MEMORY.md ${result.main}개, 일일 메모리 ${result.daily}개 청크`;
+        const sourceList = result.sources.length > 5 
+          ? result.sources.slice(0, 5).join(', ') + ` 외 ${result.sources.length - 5}개`
+          : result.sources.join(', ');
+        return `리인덱싱 완료: 총 ${result.total}개 청크 (소스: ${sourceList || '없음'})`;
       }
 
       default:

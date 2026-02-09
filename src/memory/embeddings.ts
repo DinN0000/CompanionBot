@@ -78,16 +78,30 @@ export async function embedBatch(texts: string[]): Promise<number[][]> {
 
 /**
  * 두 벡터 간의 코사인 유사도를 계산합니다.
+ * 
+ * 최적화: embed()에서 normalize: true로 정규화된 벡터를 반환하므로,
+ * 정규화된 벡터의 경우 코사인 유사도 = 내적 (norm이 1이므로)
+ * normalized 파라미터가 true면 내적만 계산하여 성능 향상.
  */
-export function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: number[], b: number[], normalized = true): number {
   if (a.length !== b.length) return 0;
   
   let dotProduct = 0;
+  
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+  }
+  
+  // 정규화된 벡터면 내적 = 코사인 유사도
+  if (normalized) {
+    return dotProduct;
+  }
+  
+  // 정규화되지 않은 벡터면 norm 계산 필요
   let normA = 0;
   let normB = 0;
   
   for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
     normA += a[i] * a[i];
     normB += b[i] * b[i];
   }

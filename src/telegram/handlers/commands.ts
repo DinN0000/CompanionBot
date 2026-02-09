@@ -1,7 +1,7 @@
 import { Bot } from "grammy";
 import { randomBytes } from "crypto";
 import { getHealthStatus, formatUptime } from "../../health/index.js";
-import { chat, MODELS, THINKING_CONFIGS, type ModelId, type ThinkingLevel, type Message } from "../../ai/claude.js";
+import { chat, MODELS, type ModelId, type Message } from "../../ai/claude.js";
 import { estimateMessagesTokens } from "../../utils/tokens.js";
 import { TOKENS, MESSAGES, MEMORY, SECURITY, TELEGRAM } from "../../config/constants.js";
 
@@ -59,8 +59,6 @@ import {
   clearHistory,
   getModel,
   setModel,
-  getThinkingLevel,
-  setThinkingLevel,
   runWithChatId,
   getPinnedContexts,
   pinContext,
@@ -311,59 +309,6 @@ export function registerCommands(bot: Bot): void {
       await ctx.reply(
         `Unknown model: ${arg}\n\n` +
         `Available: sonnet, opus, haiku`
-      );
-    }
-  });
-
-  // /thinking 명령어 - thinking 레벨 변경
-  bot.command("thinking", async (ctx) => {
-    const chatId = ctx.chat.id;
-    const arg = ctx.message?.text?.split(" ")[1]?.toLowerCase();
-    const currentLevel = getThinkingLevel(chatId);
-    const currentModel = getModel(chatId);
-    const modelSupportsThinking = MODELS[currentModel].supportsThinking;
-
-    if (!arg) {
-      const levelList = Object.entries(THINKING_CONFIGS)
-        .map(([level, config]) => {
-          const marker = level === currentLevel ? "→" : "  ";
-          const desc = level === "off" 
-            ? "비활성화" 
-            : `최대 ${config.maxBudget} 토큰 (${Math.round(config.ratio * 100)}%)`;
-          return `${marker} /thinking ${level} - ${desc}`;
-        })
-        .join("\n");
-
-      const warning = !modelSupportsThinking 
-        ? `\n\n⚠️ 현재 모델(${MODELS[currentModel].name})은 thinking을 지원하지 않습니다.`
-        : "";
-
-      await ctx.reply(
-        `🧠 Thinking 레벨: ${currentLevel}${warning}\n\n` +
-        `사용 가능한 레벨:\n${levelList}\n\n` +
-        `Thinking이 높을수록 복잡한 문제를 더 잘 해결하지만 응답이 느려집니다.`
-      );
-      return;
-    }
-
-    if (arg in THINKING_CONFIGS) {
-      const level = arg as ThinkingLevel;
-      setThinkingLevel(chatId, level);
-      
-      const config = THINKING_CONFIGS[level];
-      const desc = level === "off"
-        ? "Thinking이 비활성화되었습니다."
-        : `최대 ${config.maxBudget} 토큰 (출력의 ${Math.round(config.ratio * 100)}%)`;
-      
-      const warning = !modelSupportsThinking && level !== "off"
-        ? `\n\n⚠️ 현재 모델(${MODELS[currentModel].name})은 thinking을 지원하지 않습니다. 모델을 변경해주세요.`
-        : "";
-
-      await ctx.reply(`🧠 Thinking 레벨: ${level}\n${desc}${warning}`);
-    } else {
-      await ctx.reply(
-        `Unknown level: ${arg}\n\n` +
-        `Available: off, low, medium, high`
       );
     }
   });

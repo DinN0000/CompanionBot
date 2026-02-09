@@ -4,6 +4,7 @@ import type { Message } from "../ai/claude.js";
 import { estimateMessagesTokens, estimateTokens } from "../utils/tokens.js";
 import * as persistence from "./persistence.js";
 import { SESSION, TOKENS, MESSAGES } from "../config/constants.js";
+import { getConfig } from "../config/index.js";
 
 /**
  * 핀된 맥락 - 중요한 정보를 별도 보관
@@ -42,13 +43,15 @@ const sessions = new Map<number, SessionData>();
 const chatIdStorage = new AsyncLocalStorage<number>();
 
 function getSession(chatId: number): SessionData {
+  const config = getConfig();
+  
   // chatId 유효성 검사
   if (chatId == null || isNaN(chatId)) {
     console.error(`[Session] BUG: Invalid chatId: ${chatId} - history will NOT persist!`);
     return {
       history: [],
       model: "sonnet",
-      thinkingLevel: "medium",
+      thinkingLevel: config.thinking,
       lastAccessedAt: Date.now(),
       pinnedContexts: [],
       summaryChunks: [],
@@ -63,7 +66,7 @@ function getSession(chatId: number): SessionData {
     // 마이그레이션: 기존 세션에 새 필드 추가
     if (!existing.pinnedContexts) existing.pinnedContexts = [];
     if (!existing.summaryChunks) existing.summaryChunks = [];
-    if (!existing.thinkingLevel) existing.thinkingLevel = "medium";
+    if (!existing.thinkingLevel) existing.thinkingLevel = config.thinking;
     return existing;
   }
 
@@ -85,7 +88,7 @@ function getSession(chatId: number): SessionData {
   const session: SessionData = {
     history,
     model: "sonnet",
-    thinkingLevel: "medium",
+    thinkingLevel: config.thinking,
     lastAccessedAt: now,
     pinnedContexts: [],
     summaryChunks: [],

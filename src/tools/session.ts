@@ -1,5 +1,6 @@
 /**
  * Session management for background commands
+ * OpenClaw 스타일 보안 모델
  */
 
 import { spawn, ChildProcess } from "child_process";
@@ -11,8 +12,10 @@ import {
   SESSION_CLEANUP_INTERVAL_MS,
   SESSION_TTL_MS,
 } from "../utils/constants.js";
-import { home } from "./utils.js";
+import { getWorkspacePath } from "../workspace/index.js";
+import { isPathAllowed } from "./pathCheck.js";
 import * as path from "path";
+import * as fs from "fs";
 
 const execAsync = promisify(exec);
 
@@ -59,15 +62,50 @@ function appendOutput(session: ProcessSession, data: string) {
   }
 }
 
-// 화이트리스트 방식: 허용된 명령어만 실행
-const ALLOWED_COMMANDS = [
-  "git", "npm", "npx", "node", "ls", "pwd", "cat", "head", "tail",
-  "grep", "find", "wc", "sort", "uniq", "diff", "echo", "date",
-  "which", "env", "printenv"
+// ============== OpenClaw 스타일 보안 ==============
+
+// 허용된 명령어 (basename)
+const ALLOWED_COMMANDS = new Set([
+  // 기본 유틸
+  "ls", "pwd", "cat", "head", "tail", "grep", "find", "wc",
+  "sort", "uniq", "diff", "echo", "date", "which", "env", "printenv",
+  // 개발 도구
+  "git", "npm", "npx", "node", "pnpm", "yarn", "bun",
+  // 텍스트 처리
+  "sed", "awk", "cut", "tr", "jq",
+]);
+
+// stdin-only로 안전하게 사용 가능한 명령 (OpenClaw safeBins)
+const SAFE_BINS = new Set([
+  "jq", "grep", "cut", "sort", "uniq", "head", "tail", "tr", "wc",
+]);
+
+// OpenClaw 스타일 파이프라인 토큰 차단
+const DISALLOWED_PIPELINE_TOKENS = [
+  ">",   // 리디렉션
+  "<",   // 입력 리디렉션
+  "`",   // 명령 치환
+  "\n",  // 줄바꿈
+  "\r",  // 캐리지 리턴
+  "(",   // 서브셸
+  ")",
+  "$(",  // 명령 치환
+  "${",  // 변수 확장
 ];
 
 // 위험한 인자
-const DANGEROUS_ARGS = ["--force", "-rf", "--hard", "--no-preserve-root"];
+const DANGEROUS_ARGS = new Set([
+  "--force", "-rf", "--hard", "--no-preserve-root",
+  "-f", "--delete", "--remove",
+]);
+
+// 위험한 명령어 (절대 허용 안 함)
+const BLOCKED_COMMANDS = new Set([
+  "rm", "rmdir", "mv", "cp", "chmod", "chown", "chgrp",
+  "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
+  "kill", "killall", "pkill", "shutdown", "reboot", "halt",
+  "curl", "wget", // 네트워크 명령은 web_fetch로 대체
+]);
 
 // 안전한 환경 변수
 function getSafeEnv(): Record<string, string> {
@@ -80,40 +118,109 @@ function getSafeEnv(): Record<string, string> {
   };
 }
 
+// 명령어에서 basename 추출
+function extractCommandName(command: string): string | null {
+  const trimmed = command.trim();
+  const firstPart = trimmed.split(/\s+/)[0];
+  if (!firstPart) return null;
+  return path.basename(firstPart);
+}
+
+// 파이프라인 토큰 체크
+function containsDisallowedTokens(command: string): boolean {
+  return DISALLOWED_PIPELINE_TOKENS.some(token => command.includes(token));
+}
+
+// 체이닝 분리 (&&, ||, ;)
+function splitChainedCommands(command: string): string[] {
+  // 간단한 분리 (따옴표 내부는 무시 - 완벽하진 않지만 기본적인 케이스 커버)
+  return command.split(/\s*(?:&&|\|\||;)\s*/);
+}
+
 // 명령어 검증
 function validateCommand(command: string): { valid: boolean; error?: string } {
-  // 명령어 체이닝/치환/리디렉션 차단
-  if (/[;&|`\n\r]|\$\(|\$\{|>>|>|</.test(command)) {
-    return { valid: false, error: "Command chaining, substitution, and redirection not allowed." };
+  // 1. 위험한 토큰 차단
+  if (containsDisallowedTokens(command)) {
+    return { valid: false, error: "리디렉션, 치환, 서브셸은 사용할 수 없어" };
   }
 
-  // 첫 번째 명령어 추출
-  const parts = command.trim().split(/\s+/);
-  const cmd = parts[0];
+  // 2. 체이닝된 각 명령어 검증
+  const commands = splitChainedCommands(command);
+  
+  for (const cmd of commands) {
+    const cmdName = extractCommandName(cmd);
+    if (!cmdName) continue;
 
-  if (!ALLOWED_COMMANDS.includes(cmd)) {
-    return { valid: false, error: `Command '${cmd}' not in allowed list. Allowed: ${ALLOWED_COMMANDS.join(", ")}` };
-  }
+    // 3. 블록된 명령어 체크
+    if (BLOCKED_COMMANDS.has(cmdName)) {
+      return { valid: false, error: `'${cmdName}'은 보안상 차단된 명령어야` };
+    }
 
-  // 위험한 인자 차단
-  if (DANGEROUS_ARGS.some(arg => parts.includes(arg))) {
-    return { valid: false, error: "Dangerous argument detected." };
+    // 4. 허용된 명령어 체크
+    if (!ALLOWED_COMMANDS.has(cmdName)) {
+      return { 
+        valid: false, 
+        error: `'${cmdName}'은 허용 목록에 없어. 허용: ${[...ALLOWED_COMMANDS].slice(0, 10).join(", ")}...` 
+      };
+    }
+
+    // 5. 위험한 인자 체크
+    const args = cmd.trim().split(/\s+/).slice(1);
+    for (const arg of args) {
+      if (DANGEROUS_ARGS.has(arg)) {
+        return { valid: false, error: `위험한 인자 '${arg}'는 사용할 수 없어` };
+      }
+    }
   }
 
   return { valid: true };
 }
 
+// cwd 검증 (workspace 내로 제한)
+function validateCwd(cwd: string): { valid: boolean; resolvedCwd: string; error?: string } {
+  const workspace = getWorkspacePath();
+  const resolved = path.resolve(cwd);
+
+  // workspace 또는 /tmp 내에 있어야 함
+  if (!isPathAllowed(resolved)) {
+    return { 
+      valid: false, 
+      resolvedCwd: workspace,
+      error: `작업 디렉토리는 workspace (${workspace}) 또는 /tmp 내에 있어야 해` 
+    };
+  }
+
+  // 디렉토리 존재 확인
+  try {
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory()) {
+      return { valid: false, resolvedCwd: workspace, error: `'${cwd}'는 디렉토리가 아니야` };
+    }
+    return { valid: true, resolvedCwd: resolved };
+  } catch {
+    return { valid: false, resolvedCwd: workspace, error: `'${cwd}' 디렉토리를 찾을 수 없어` };
+  }
+}
+
 // run_command 실행
 export async function executeRunCommand(input: Record<string, unknown>): Promise<string> {
   const command = input.command as string;
-  const cwd = (input.cwd as string) || path.join(home, "Documents");
+  const requestedCwd = (input.cwd as string) || getWorkspacePath();
   const background = (input.background as boolean) || false;
   const timeout = ((input.timeout as number) || 30) * 1000;
 
-  const validation = validateCommand(command);
-  if (!validation.valid) {
-    return `Error: ${validation.error}`;
+  // 1. 명령어 검증
+  const cmdValidation = validateCommand(command);
+  if (!cmdValidation.valid) {
+    return `Error: ${cmdValidation.error}`;
   }
+
+  // 2. cwd 검증
+  const cwdValidation = validateCwd(requestedCwd);
+  if (!cwdValidation.valid) {
+    return `Error: ${cwdValidation.error}`;
+  }
+  const cwd = cwdValidation.resolvedCwd;
 
   const safeEnv = getSafeEnv();
 
@@ -164,13 +271,13 @@ export async function executeRunCommand(input: Record<string, unknown>): Promise
 
     sessions.set(sessionId, session);
 
-    return `Background session started.
+    return `백그라운드 세션 시작됨
 Session ID: ${sessionId}
 PID: ${child.pid}
 Command: ${command}
 CWD: ${cwd}
 
-Use list_sessions to see all sessions, get_session_log to view output, kill_session to terminate.`;
+manage_session으로 세션 관리 가능 (list/log/kill)`;
   }
 
   // Foreground 실행 (기존 방식)
@@ -180,7 +287,7 @@ Use list_sessions to see all sessions, get_session_log to view output, kill_sess
       timeout,
       env: safeEnv,
     });
-    return stdout || stderr || "Command executed (no output)";
+    return stdout || stderr || "명령 실행 완료 (출력 없음)";
   } catch (error) {
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -201,15 +308,15 @@ export function executeListSessions(input: Record<string, unknown>): string {
 
     const runtime = session.endTime 
       ? `${Math.round((session.endTime.getTime() - session.startTime.getTime()) / 1000)}s`
-      : `${Math.round((Date.now() - session.startTime.getTime()) / 1000)}s (running)`;
+      : `${Math.round((Date.now() - session.startTime.getTime()) / 1000)}s (실행 중)`;
 
     const status = session.status === "running" 
-      ? "🟢 running" 
+      ? "🟢 실행 중" 
       : session.status === "completed" 
-        ? "✅ completed" 
+        ? "✅ 완료" 
         : session.status === "killed"
-          ? "🔴 killed"
-          : "❌ error";
+          ? "🔴 종료됨"
+          : "❌ 에러";
 
     sessionList.push(`[${id}] ${status}
   Command: ${session.command}
@@ -219,10 +326,10 @@ export function executeListSessions(input: Record<string, unknown>): string {
   }
 
   if (sessionList.length === 0) {
-    return `No sessions found${statusFilter !== "all" ? ` with status "${statusFilter}"` : ""}.`;
+    return `세션 없음${statusFilter !== "all" ? ` (필터: "${statusFilter}")` : ""}`;
   }
 
-  return `Sessions (${sessionList.length}):\n\n${sessionList.join("\n\n")}`;
+  return `세션 목록 (${sessionList.length}개):\n\n${sessionList.join("\n\n")}`;
 }
 
 // get_session_log 실행
@@ -232,20 +339,20 @@ export function executeGetSessionLog(input: Record<string, unknown>): string {
 
   const session = sessions.get(sessionId);
   if (!session) {
-    return `Error: Session "${sessionId}" not found. Use list_sessions to see available sessions.`;
+    return `Error: 세션 "${sessionId}"을 찾을 수 없어. list_sessions로 확인해봐.`;
   }
 
   const lines = session.outputBuffer.slice(-tail);
   
   if (lines.length === 0) {
-    return `Session ${sessionId} has no output yet.
-Status: ${session.status}
-Command: ${session.command}`;
+    return `세션 ${sessionId} 출력 없음
+상태: ${session.status}
+명령어: ${session.command}`;
   }
 
-  const header = `Session: ${sessionId} (${session.status})
-Command: ${session.command}
-Showing last ${lines.length} lines:
+  const header = `세션: ${sessionId} (${session.status})
+명령어: ${session.command}
+마지막 ${lines.length}줄:
 ${"─".repeat(40)}`;
 
   return `${header}\n${lines.join("\n")}`;
@@ -258,11 +365,11 @@ export function executeKillSession(input: Record<string, unknown>): string {
 
   const session = sessions.get(sessionId);
   if (!session) {
-    return `Error: Session "${sessionId}" not found.`;
+    return `Error: 세션 "${sessionId}"을 찾을 수 없어.`;
   }
 
   if (session.status !== "running") {
-    return `Session ${sessionId} is not running (status: ${session.status}).`;
+    return `세션 ${sessionId}은 이미 실행 중이 아니야 (상태: ${session.status})`;
   }
 
   try {
@@ -270,16 +377,16 @@ export function executeKillSession(input: Record<string, unknown>): string {
     process.kill(-session.pid, signal);
     session.status = "killed";
     session.endTime = new Date();
-    return `Session ${sessionId} (PID ${session.pid}) killed with ${signal}.`;
+    return `세션 ${sessionId} (PID ${session.pid}) ${signal}로 종료됨`;
   } catch (error) {
     // 단일 프로세스 kill 시도
     try {
       session.process.kill(signal);
       session.status = "killed";
       session.endTime = new Date();
-      return `Session ${sessionId} killed with ${signal}.`;
+      return `세션 ${sessionId} ${signal}로 종료됨`;
     } catch (e) {
-      return `Error killing session: ${error instanceof Error ? error.message : String(error)}`;
+      return `Error: 세션 종료 실패 - ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 }

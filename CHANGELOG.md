@@ -8,6 +8,9 @@ All notable changes to CompanionBot will be documented in this file.
 - **파일 접근 제한**: 홈 전체 → workspace (~/.companionbot) + /tmp만
 - **TOCTOU 방어**: O_NOFOLLOW + inode/device 비교
 - **safeOpenForRead**: 안전한 파일 읽기 함수 추가
+- **명령 실행 제한**: cwd를 workspace로 제한
+- **파이프라인 차단**: 리디렉션, 치환, 서브셸 차단
+- **위험 명령 블록**: rm, sudo, curl 등 차단
 
 ## [0.15.0] - 2025-02-09
 

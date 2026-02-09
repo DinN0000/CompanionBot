@@ -458,7 +458,8 @@ export async function chatSmart(
         }
       }
       
-      const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
+      // 도구 사용 시 thinking 비활성화 (API 에러 방지)
+      const result = await chat(messages, systemPrompt, modelId, "off");
       return { text: result.text, usedTools: true, toolsUsed: result.toolsUsed };
     }
 
@@ -471,8 +472,8 @@ export async function chatSmart(
       if (error.status === 429 || error.status >= 500) {
         console.log(`[Stream] Pre-stream error (${error.status}), retrying with withRetry...`);
         return await withRetry(async () => {
-          // 재시도 시 일반 chat 사용 (스트리밍 대신)
-          const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
+          // 재시도 시 일반 chat 사용 (스트리밍 대신, thinking 비활성화)
+          const result = await chat(messages, systemPrompt, modelId, "off");
           return { text: result.text, usedTools: false, toolsUsed: result.toolsUsed };
         });
       }

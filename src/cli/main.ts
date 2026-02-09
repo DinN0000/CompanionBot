@@ -1,4 +1,5 @@
 import * as readline from "readline";
+import { checkbox, input, confirm } from "@inquirer/prompts";
 import { getSecret, setSecret } from "../config/secrets.js";
 import {
   isWorkspaceInitialized,
@@ -57,43 +58,39 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
 │  ├─ ⏰ 리마인더        알림 설정 ("3시에 알려줘")           │
 │  └─ 🧠 메모리          대화 기억, 장기 기억 저장            │
 └──────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│  [선택] 추가 기능                                            │
-│                                                              │
-│  [1] 🔍 웹 검색      최신 정보 검색 (Brave API, 무료 2000/월)│
-│  [2] 📅 캘린더       Google Calendar 일정 확인/추가         │
-│  [3] 🌤️  날씨        현재 날씨, 브리핑 (OpenWeatherMap, 무료)│
-└──────────────────────────────────────────────────────────────┘
-
-   사용할 기능 번호를 입력하세요.
-   예: 1,3  또는  1 2 3  또는  all (모두 선택)
-   Enter만 누르면 기본 기능만 사용합니다.
 `);
 
-    const featureInput = await question(rl, "   선택 (q=취소): ");
-    if (featureInput.toLowerCase() === "q") {
+    let selectedValues: string[] = [];
+    try {
+      selectedValues = await checkbox({
+        message: "추가 기능 선택 (Space=선택, Enter=확정, 그냥 Enter=건너뛰기)",
+        choices: [
+          { 
+            name: "🔍 웹 검색 - 최신 정보 검색 (Brave API, 무료 2000/월)", 
+            value: "webSearch" 
+          },
+          { 
+            name: "📅 캘린더 - Google Calendar 일정 확인/추가", 
+            value: "calendar" 
+          },
+          { 
+            name: "🌤️  날씨 - 현재 날씨, 브리핑 (OpenWeatherMap, 무료)", 
+            value: "weather" 
+          },
+        ],
+      });
+    } catch {
+      // Ctrl+C 등으로 취소
       console.log("\n👋 설정을 취소했습니다.");
       rl.close();
       return false;
     }
 
     const features: FeatureSelection = {
-      webSearch: false,
-      calendar: false,
-      weather: false,
+      webSearch: selectedValues.includes("webSearch"),
+      calendar: selectedValues.includes("calendar"),
+      weather: selectedValues.includes("weather"),
     };
-
-    if (featureInput.toLowerCase() === "all") {
-      features.webSearch = true;
-      features.calendar = true;
-      features.weather = true;
-    } else {
-      const selections = featureInput.replace(/,/g, " ").split(/\s+/).filter(Boolean);
-      features.webSearch = selections.includes("1");
-      features.calendar = selections.includes("2");
-      features.weather = selections.includes("3");
-    }
 
     // 선택 요약
     const selectedFeatures = [];

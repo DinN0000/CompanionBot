@@ -155,7 +155,7 @@ export async function chat(
   messages: Message[],
   systemPrompt?: string,
   modelId: ModelId = "sonnet",
-  thinkingLevel: ThinkingLevel = "medium"
+  _thinkingLevel?: ThinkingLevel  // 사용 안 함 (non-streaming에서 에러 발생)
 ): Promise<ChatResult> {
   const client = getClient();
   const modelConfig = MODELS[modelId];
@@ -184,11 +184,11 @@ export async function chat(
     return total;
   };
 
-  // 동적 토큰 budget 계산
+  // 토큰 계산 (thinking 비활성화 - non-streaming에서 에러 발생)
   const inputTokens = estimateInputTokens();
-  const { maxTokens, thinkingBudget } = calculateTokenBudgets(modelId, thinkingLevel, inputTokens);
+  const maxTokens = 8192;
   
-  console.log(`[Chat] model=${modelId}, thinking=${thinkingLevel}, input~${inputTokens}, maxTokens=${maxTokens}, budget=${thinkingBudget}`);
+  console.log(`[Chat] model=${modelId}, input~${inputTokens}, maxTokens=${maxTokens}`);
 
   // API 요청 파라미터 빌드 (도구 루프에서도 동일하게 사용)
   const buildRequestParams = (): Anthropic.MessageCreateParamsNonStreaming => {
@@ -201,14 +201,6 @@ export async function chat(
 
     if (systemPrompt) {
       params.system = systemPrompt;
-    }
-
-    // thinking 활성화 (budget > 0인 경우)
-    if (thinkingBudget > 0) {
-      params.thinking = {
-        type: "enabled",
-        budget_tokens: thinkingBudget,
-      };
     }
 
     return params;

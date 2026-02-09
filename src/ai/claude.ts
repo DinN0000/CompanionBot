@@ -93,13 +93,13 @@ export const MODELS: Record<ModelId, ModelConfig> = {
   sonnet: {
     id: "claude-sonnet-4-20250514",
     name: "Claude Sonnet 4",
-    maxTokens: 8192,        // 일반 작업
+    maxTokens: 16000,       // 일반 작업 (must be > thinkingBudget)
     thinkingBudget: 10000,  // 적당한 thinking
   },
   opus: {
     id: "claude-opus-4-20250514",
     name: "Claude Opus 4",
-    maxTokens: 16384,       // 복잡한 작업
+    maxTokens: 64000,       // 복잡한 작업 (must be > thinkingBudget)
     thinkingBudget: 32000,  // 깊은 thinking
   },
 };

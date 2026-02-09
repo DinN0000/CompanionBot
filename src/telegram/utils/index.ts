@@ -5,4 +5,4 @@ export { extractUrls, fetchWebContent, isSafeUrl, formatUrlContent, clearUrlCach
 export { buildSystemPrompt, extractName } from "./prompt.js";
 
 // Cache utilities
-export { getWorkspace, invalidateWorkspaceCache } from "./cache.js";
+export { getWorkspace, invalidateWorkspaceCache, preloadWorkspace, isWorkspaceCached } from "./cache.js";

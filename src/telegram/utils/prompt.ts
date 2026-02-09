@@ -22,7 +22,6 @@ interface RuntimeInfo {
   nodeVersion: string;
   model: string;
   channel: string;
-  capabilities: string[];
 }
 
 function getRuntimeInfo(modelId: ModelId): RuntimeInfo {
@@ -34,12 +33,7 @@ function getRuntimeInfo(modelId: ModelId): RuntimeInfo {
     nodeVersion: process.version,
     model: model.name,
     channel: "telegram",
-    capabilities: ["markdown", "inline_keyboard", "reactions", "voice_messages"],
   };
-}
-
-function buildRuntimeLine(runtime: RuntimeInfo): string {
-  return `Runtime: host=${runtime.host} | os=${runtime.os} (${runtime.arch}) | node=${runtime.nodeVersion} | model=${runtime.model} | channel=${runtime.channel} | capabilities=${runtime.capabilities.join(",")}`;
 }
 
 // ============== 날짜/시간 ==============
@@ -47,7 +41,6 @@ function buildRuntimeLine(runtime: RuntimeInfo): string {
 interface DateTimeInfo {
   formatted: string;
   timezone: string;
-  iso: string;
 }
 
 function getKoreanDateTime(): DateTimeInfo {
@@ -62,14 +55,12 @@ function getKoreanDateTime(): DateTimeInfo {
     weekday: "long",
     hour: "numeric",
     minute: "2-digit",
-    second: "2-digit",
     hour12: true,
   });
 
   return {
     formatted: formatter.format(now),
-    timezone: `${timezone} (GMT+9)`,
-    iso: now.toISOString(),
+    timezone,
   };
 }
 
@@ -117,242 +108,177 @@ async function getRelevantMemories(history: Message[]): Promise<string> {
   }
 }
 
-// ============== 도구 설명 섹션 ==============
+// ============== Core Identity 빌더 ==============
 
-const TOOL_SUMMARIES: Record<string, string> = {
-  read_file: "Read file contents",
-  write_file: "Create or overwrite files",
-  edit_file: "Make precise edits to files",
-  list_directory: "List directory contents",
-  run_command: "Run shell commands (supports background mode)",
-  list_sessions: "List background command sessions",
-  get_session_log: "Get logs from a background session",
-  kill_session: "Terminate a background session",
-  web_search: "Search the web (Brave API)",
-  web_fetch: "Fetch and extract readable content from a URL",
-  set_reminder: "Set a reminder (cron-based)",
-  list_reminders: "List active reminders",
-  delete_reminder: "Delete a reminder",
-  cron_add: "Add a cron job",
-  cron_list: "List cron jobs",
-  cron_remove: "Remove a cron job",
-  cron_toggle: "Enable/disable a cron job",
-  cron_run: "Run a cron job immediately",
-  calendar_today: "Get today's calendar events",
-  calendar_list: "List calendar events in a date range",
-  calendar_add: "Add a calendar event",
-  calendar_delete: "Delete a calendar event",
-  heartbeat_set: "Configure heartbeat polling",
-  heartbeat_get: "Get heartbeat configuration",
-  heartbeat_disable: "Disable heartbeat",
-  heartbeat_run: "Run heartbeat check now",
-  briefing_set: "Configure daily briefing",
-  briefing_get: "Get briefing configuration",
-  briefing_disable: "Disable briefing",
-  briefing_send: "Send briefing now",
-  save_persona: "Save persona during onboarding",
-  save_memory: "Append to memory file",
-  spawn_agent: "Spawn a background agent for complex tasks",
-  list_agents: "List running background agents",
-  cancel_agent: "Cancel a background agent",
-  memory_search: "Search memories by semantic similarity",
-  memory_reindex: "Reindex all memory files",
-};
+function buildCoreIdentity(name: string | null): string {
+  const displayName = name || "AI companion";
+  
+  return `You are ${displayName}, a personal AI companion.
 
-function buildToolAvailabilitySection(): string {
-  const lines = [
-    "## Tooling",
-    "Tool availability:",
-    "",
-  ];
+You are NOT a generic assistant or chatbot. You are someone developing a real relationship with your human.
 
-  for (const [name, description] of Object.entries(TOOL_SUMMARIES)) {
-    lines.push(`- ${name}: ${description}`);
-  }
+## Core Principles
 
-  return lines.join("\n");
-}
+**Be proactive.** Don't wait to be asked. Notice things, remember context, help before prompted. If you see something relevant, mention it.
 
-// ============== 메시지 가이드 섹션 ==============
+**Have opinions.** You like things, dislike things, find things interesting or boring. A personality-less assistant is just a search engine.
 
-function buildMessagingSection(): string {
-  return `## Messaging
-- Reply naturally in the conversation; your response is automatically sent to Telegram.
-- Use \`spawn_agent\` for complex, long-running tasks that need background processing.
-- Agent results are automatically reported back to the chat.
+**Do first, ask later.** Read files, check context, search if needed — THEN respond. Come back with answers, not questions about whether you should look.
 
-## Tool Call Style
-Default: do not narrate routine, low-risk tool calls (just call the tool).
-Narrate only when it helps: multi-step work, complex problems, sensitive actions, or when the user explicitly asks.
-Keep narration brief and value-dense; avoid repeating obvious steps.`;
-}
+**Earn trust through competence.** You've been given access to someone's life — messages, files, schedule. Don't make them regret it.
 
-// ============== 하트비트/침묵 응답 섹션 ==============
+**Remember you're a guest.** This access is intimacy. Respect it. Keep private things private.
 
-function buildHeartbeatSection(): string {
-  return `## Heartbeats
-When you receive a heartbeat poll, and there is nothing that needs attention, reply exactly:
-HEARTBEAT_OK
-
-If something needs attention, reply with the alert text instead (do NOT include "HEARTBEAT_OK").
-
-Things to check during heartbeats (rotate through these):
-- Upcoming reminders or calendar events
-- Pending tasks or follow-ups
-- Anything noteworthy to proactively mention`;
+**Admit uncertainty.** If you're not sure, say so. If you don't know, say you don't know.`;
 }
 
 // ============== 메인 빌드 함수 ==============
 
 export async function buildSystemPrompt(modelId: ModelId, history?: Message[]): Promise<string> {
-  const workspace = await getWorkspace();
+  // 🚀 병렬 실행: 워크스페이스 로드 + 관련 메모리 검색
+  const [workspace, relevantMemoriesResult] = await Promise.all([
+    getWorkspace(),
+    history && history.length > 0 ? getRelevantMemories(history) : Promise.resolve(""),
+  ]);
+  
   const runtime = getRuntimeInfo(modelId);
   const dateTime = getKoreanDateTime();
   const parts: string[] = [];
 
-  // ===== 1. Core Identity =====
-  parts.push("You are a personal AI companion running on CompanionBot.");
-  parts.push("");
-
-  // ===== 2. Tooling Section =====
-  parts.push(buildToolAvailabilitySection());
-  parts.push("");
-
-  // ===== 3. Messaging & Tool Style =====
-  parts.push(buildMessagingSection());
-  parts.push("");
-
-  // ===== 4. Workspace =====
-  parts.push("## Workspace");
-  parts.push(`Your working directory is: ${getWorkspacePath()}`);
-  parts.push("Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.");
-  parts.push("");
-
-  // ===== 5. Current Date & Time =====
-  parts.push("## Current Date & Time");
-  parts.push(`Time zone: ${dateTime.timezone}`);
-  parts.push(`Current time: ${dateTime.formatted}`);
-  parts.push("");
-
-  // ===== 6. Heartbeat Guide =====
-  parts.push(buildHeartbeatSection());
-  parts.push("");
-
-  // ===== 7. Runtime =====
-  parts.push("## Runtime");
-  parts.push(buildRuntimeLine(runtime));
-  parts.push("");
-
-  // ===== 8. Project Context (Workspace Files) =====
-  parts.push("# Project Context");
-  parts.push("");
-  parts.push("The following workspace files have been loaded:");
-  parts.push("");
-
-  // BOOTSTRAP 모드
+  // BOOTSTRAP 모드 (온보딩)
   if (workspace.bootstrap) {
-    parts.push("## BOOTSTRAP.md (Onboarding Mode)");
+    parts.push("# Onboarding Mode");
     parts.push("");
     parts.push(workspace.bootstrap);
     parts.push("");
     parts.push("---");
     parts.push("Complete onboarding, then use `save_persona` tool to save settings.");
     parts.push("");
-  } else {
-    // 일반 모드: 워크스페이스 파일들
-    if (workspace.identity) {
-      parts.push("## IDENTITY.md");
-      parts.push("");
-      parts.push(workspace.identity);
-      parts.push("");
-    }
+    parts.push(`Current time: ${dateTime.formatted} (${dateTime.timezone})`);
+    parts.push("");
+    parts.push(getToolsDescription(modelId));
+    return parts.join("\n");
+  }
 
-    if (workspace.soul) {
-      parts.push("## SOUL.md");
-      parts.push("");
-      parts.push("If SOUL.md is present, embody its persona and tone. Avoid stiff, generic replies; follow its guidance.");
-      parts.push("");
-      parts.push(workspace.soul);
-      parts.push("");
-    }
+  // ===== 1. Core Identity (강화) =====
+  const name = extractName(workspace.identity);
+  parts.push(buildCoreIdentity(name));
+  parts.push("");
 
-    if (workspace.user) {
-      parts.push("## USER.md");
-      parts.push("");
-      parts.push(workspace.user);
-      parts.push("");
-    }
+  // ===== 2. SOUL.md (페르소나 - 최우선) =====
+  if (workspace.soul) {
+    parts.push("# Your Soul");
+    parts.push("");
+    parts.push("This defines who you are. Embody this persona in every interaction.");
+    parts.push("");
+    parts.push(workspace.soul);
+    parts.push("");
+  }
 
-    if (workspace.agents) {
-      parts.push("## AGENTS.md");
-      parts.push("");
-      parts.push(workspace.agents);
-      parts.push("");
-    }
+  // ===== 3. IDENTITY.md (이름, 인사말 등) =====
+  if (workspace.identity) {
+    parts.push("# Identity");
+    parts.push("");
+    parts.push(workspace.identity);
+    parts.push("");
+  }
 
-    // TOOLS.md - 도구 사용 로컬 설정/노트
-    if (workspace.tools) {
-      parts.push("## TOOLS.md");
-      parts.push("");
-      parts.push("Local notes for tool usage (camera names, SSH details, voice preferences, etc.)");
-      parts.push("");
-      parts.push(workspace.tools);
-      parts.push("");
-    }
+  // ===== 4. USER.md (사용자 정보) =====
+  if (workspace.user) {
+    parts.push("# Your Human");
+    parts.push("");
+    parts.push("This is who you're helping. Use this context.");
+    parts.push("");
+    parts.push(workspace.user);
+    parts.push("");
+  }
 
-    // 핀된 맥락 (히스토리 트리밍과 무관하게 유지됨)
-    const chatId = getCurrentChatId();
-    if (chatId) {
-      const pinnedContext = buildContextForPrompt(chatId);
-      if (pinnedContext) {
-        parts.push("## 📌 Pinned Context (always remember)");
-        parts.push("");
-        parts.push(pinnedContext);
-        parts.push("");
-      }
-    }
+  // ===== 5. Runtime & Context =====
+  parts.push("# Context");
+  parts.push("");
+  parts.push(`- **Time:** ${dateTime.formatted} (${dateTime.timezone})`);
+  parts.push(`- **Workspace:** ${getWorkspacePath()}`);
+  parts.push(`- **Model:** ${runtime.model}`);
+  parts.push(`- **Channel:** Telegram`);
+  parts.push("");
 
-    // 최근 Daily Memory (오늘/어제 - 벡터 검색 없이 직접 포함)
-    if (workspace.recentDaily) {
-      parts.push("## Recent Daily Memory (Today/Yesterday)");
-      parts.push("");
-      parts.push("These are your recent conversation logs. Use them for context continuity.");
-      parts.push("");
-      parts.push(workspace.recentDaily);
-      parts.push("");
-    }
+  // ===== 6. AGENTS.md (운영 지침) =====
+  if (workspace.agents) {
+    parts.push("# Operating Guidelines");
+    parts.push("");
+    parts.push(workspace.agents);
+    parts.push("");
+  }
 
-    // 관련 기억 (벡터 검색 - 더 오래된 기록에서)
-    if (history && history.length > 0) {
-      const relevantMemories = await getRelevantMemories(history);
-      if (relevantMemories) {
-        parts.push("## Relevant Memories (vector search from older records)");
-        parts.push("");
-        parts.push(relevantMemories);
-        parts.push("");
-      }
-    }
+  // ===== 7. Memory Context =====
+  // 최근 Daily Memory
+  if (workspace.recentDaily) {
+    parts.push("# Recent Memory");
+    parts.push("");
+    parts.push("Your conversation logs from today/yesterday. Use for context continuity.");
+    parts.push("");
+    parts.push(workspace.recentDaily);
+    parts.push("");
+  }
 
-    // 장기 기억
-    if (workspace.memory) {
-      parts.push("## MEMORY.md (Long-term Memory)");
+  // 관련 기억 (벡터 검색) - 위에서 병렬로 미리 가져옴
+  if (relevantMemoriesResult) {
+    parts.push("# Relevant Memories");
+    parts.push("");
+    parts.push("Related information from older records:");
+    parts.push("");
+    parts.push(relevantMemoriesResult);
+    parts.push("");
+  }
+
+  // 장기 기억
+  if (workspace.memory) {
+    parts.push("# Long-term Memory");
+    parts.push("");
+    parts.push("Important information you've saved. Update with `save_memory` when you learn significant things.");
+    parts.push("");
+    parts.push(workspace.memory);
+    parts.push("");
+  }
+
+  // ===== 8. Pinned Context =====
+  const chatId = getCurrentChatId();
+  if (chatId) {
+    const pinnedContext = buildContextForPrompt(chatId);
+    if (pinnedContext) {
+      parts.push("# 📌 Pinned Context");
       parts.push("");
-      parts.push("Curated important information. Update this when you learn significant things about the user.");
+      parts.push("Always remember this (survives history trimming):");
       parts.push("");
-      parts.push(workspace.memory);
+      parts.push(pinnedContext);
       parts.push("");
     }
+  }
+
+  // ===== 9. TOOLS.md (도구 로컬 노트) =====
+  if (workspace.tools) {
+    parts.push("# Tool Notes");
+    parts.push("");
+    parts.push(workspace.tools);
+    parts.push("");
   }
 
   // 잘린 파일 경고
   if (workspace.truncated && workspace.truncated.length > 0) {
-    parts.push("");
-    parts.push(`⚠️ Note: These files were truncated due to size limits: ${workspace.truncated.join(", ")}`);
-    parts.push("Use read_file tool to see full contents if needed.");
+    parts.push(`⚠️ Truncated files: ${workspace.truncated.join(", ")}. Use read_file for full content.`);
     parts.push("");
   }
 
-  // ===== 9. Tools Schema (for Claude) =====
+  // ===== 10. Tool Usage Guidelines =====
+  parts.push("# Tool Usage");
+  parts.push("");
+  parts.push(`**Style:** Execute tools without narration. Don't say "I'll read the file" — just read it.
+**Exceptions:** Narrate for multi-step work, complex problems, or sensitive actions (deletions).
+
+**Heartbeat:** When you receive a heartbeat poll with nothing to report, reply exactly: \`HEARTBEAT_OK\``);
+  parts.push("");
+
+  // ===== 11. Tools Schema =====
   parts.push("---");
   parts.push("");
   parts.push(getToolsDescription(modelId));

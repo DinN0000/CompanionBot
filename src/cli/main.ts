@@ -10,6 +10,7 @@ import { createBot } from "../telegram/bot.js";
 import { cleanupHeartbeats } from "../heartbeat/index.js";
 import { cleanupBriefings } from "../briefing/index.js";
 import { cleanupReminders } from "../reminders/index.js";
+import { preloadEmbeddingModel, preloadVectorStore } from "../memory/index.js";
 
 function createPrompt(): readline.Interface {
   return readline.createInterface({
@@ -263,7 +264,25 @@ async function main() {
   // 4. 환경변수 설정
   process.env.ANTHROPIC_API_KEY = apiKey;
 
-  // 5. 봇 시작
+  // 5. 🚀 사전 로딩 (첫 응답 속도 개선)
+  console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║                   ⏳ 시스템 사전 로딩...                       ║
+╚═══════════════════════════════════════════════════════════════╝
+`);
+  
+  const preloadStart = Date.now();
+  
+  // 임베딩 모델 + 벡터 저장소 병렬 로딩
+  await Promise.all([
+    preloadEmbeddingModel(),
+    preloadVectorStore(),
+  ]);
+  
+  console.log(`   ✓ 사전 로딩 완료 (${Date.now() - preloadStart}ms)
+`);
+
+  // 6. 봇 시작
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║                      🚀 봇 시작!                              ║

@@ -1,5 +1,5 @@
 import type { Bot, Context } from "grammy";
-import { chat, chatSmart, type Message, type ModelId, type ThinkingLevel } from "../../ai/claude.js";
+import { chat, chatSmart, type Message, type ModelId, type ThinkingLevel, type StreamCallbacks } from "../../ai/claude.js";
 import { recordActivity, recordError } from "../../health/index.js";
 import {
   getHistory,
@@ -22,6 +22,80 @@ import {
 } from "../utils/index.js";
 import { estimateMessagesTokens } from "../../utils/tokens.js";
 import { TOKENS, TELEGRAM } from "../../config/constants.js";
+import { formatErrorForUser, toUserFriendlyError } from "../../utils/retry.js";
+
+/**
+ * 도구 이름을 친화적인 상태 메시지로 변환
+ */
+function getToolStatusMessage(toolName: string): { icon: string; text: string; estimate: string } {
+  const messages = TELEGRAM.TOOL_STATUS_MESSAGES;
+  return messages[toolName] || { icon: "🔧", text: toolName, estimate: "" };
+}
+
+/**
+ * 여러 도구의 상태를 친화적인 메시지로 포맷
+ */
+function formatToolsStatus(toolNames: string[]): string {
+  if (toolNames.length === 0) return "";
+  
+  if (toolNames.length === 1) {
+    const status = getToolStatusMessage(toolNames[0]);
+    const estimateText = status.estimate ? ` (약 ${status.estimate})` : "";
+    return `${status.icon} ${status.text}...${estimateText}`;
+  }
+  
+  // 여러 도구: 아이콘만 모아서 표시 + 첫 번째 도구 텍스트
+  const icons = toolNames.map(t => getToolStatusMessage(t).icon).join(" ");
+  const firstStatus = getToolStatusMessage(toolNames[0]);
+  return `${icons} ${firstStatus.text} 외 ${toolNames.length - 1}개...`;
+}
+
+/**
+ * Typing indicator를 주기적으로 갱신하는 클래스
+ * 텔레그램은 5초 후 typing 상태가 자동 해제되므로, 긴 작업 중 유지 필요
+ */
+class TypingIndicator {
+  private ctx: Context;
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private isActive = false;
+  
+  constructor(ctx: Context) {
+    this.ctx = ctx;
+  }
+  
+  /** typing 표시 시작 (주기적 갱신) */
+  start(): void {
+    if (this.isActive) return;
+    this.isActive = true;
+    
+    // 즉시 한 번 전송
+    this.sendTyping();
+    
+    // 주기적으로 갱신 (4초마다 - 5초 만료 전)
+    this.intervalId = setInterval(() => {
+      if (this.isActive) {
+        this.sendTyping();
+      }
+    }, TELEGRAM.TYPING_REFRESH_MS);
+  }
+  
+  /** typing 표시 중지 */
+  stop(): void {
+    this.isActive = false;
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+  
+  private async sendTyping(): Promise<void> {
+    try {
+      await this.ctx.replyWithChatAction("typing");
+    } catch {
+      // 실패해도 무시 (봇 차단 등)
+    }
+  }
+}
 
 /**
  * 토큰 사용량이 임계치를 넘으면 자동으로 히스토리 압축
@@ -65,7 +139,48 @@ async function autoCompactIfNeeded(
 }
 
 /**
+ * 긴 메시지를 텔레그램 제한에 맞게 분할
+ */
+function splitLongMessage(text: string, maxLength: number = TELEGRAM.MAX_MESSAGE_LENGTH): string[] {
+  if (text.length <= maxLength) return [text];
+  
+  const parts: string[] = [];
+  let remaining = text;
+  
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      parts.push(remaining);
+      break;
+    }
+    
+    // 자연스러운 분할 지점 찾기 (문단 > 문장 > 단어 > 강제)
+    let splitPoint = remaining.lastIndexOf("\n\n", maxLength);
+    if (splitPoint < maxLength * 0.5) {
+      splitPoint = remaining.lastIndexOf(". ", maxLength);
+    }
+    if (splitPoint < maxLength * 0.5) {
+      splitPoint = remaining.lastIndexOf(" ", maxLength);
+    }
+    if (splitPoint < maxLength * 0.3) {
+      splitPoint = maxLength;
+    }
+    
+    parts.push(remaining.slice(0, splitPoint));
+    remaining = remaining.slice(splitPoint).trimStart();
+  }
+  
+  return parts;
+}
+
+/**
  * 스트리밍 응답 전송 (Telegram 메시지 실시간 업데이트)
+ * 
+ * 개선사항:
+ * - 적응형 업데이트 간격 (첫 응답 빠르게, 이후 안정화)
+ * - 도구 사용 시 친화적인 상태 메시지 표시
+ * - 긴 응답 자동 분할
+ * - thinking 상태 표시
+ * - 진행 단계 표시 (생각 중 → 도구 사용 → 응답 작성)
  */
 async function sendStreamingResponse(
   ctx: Context,
@@ -74,58 +189,170 @@ async function sendStreamingResponse(
   modelId: ModelId,
   thinkingLevel: ThinkingLevel
 ): Promise<string> {
-  // 1. 먼저 "..." 플레이스홀더 메시지 전송
-  const placeholder = await ctx.reply("...");
+  const { STREAM_INTERVAL, STREAM_ICONS, MAX_MESSAGE_LENGTH } = TELEGRAM;
+  
+  // 1. thinking 표시로 시작 + 단계 안내
+  const initialText = thinkingLevel !== "off" 
+    ? `${STREAM_ICONS.THINKING} 생각하는 중...`
+    : `${STREAM_ICONS.THINKING} 응답 준비 중...`;
+  const placeholder = await ctx.reply(initialText);
   const chatId = ctx.chat!.id;
   const messageId = placeholder.message_id;
 
-  let lastUpdate = Date.now();
-  const UPDATE_INTERVAL = TELEGRAM.STREAM_UPDATE_INTERVAL_MS;
+  let lastUpdate = 0;  // 첫 업데이트는 즉시
+  let updateCount = 0;
   let lastText = "";
+  let currentPhase: "thinking" | "generating" | "tools" = "thinking";
+  let toolStartTime = 0;
+  let currentToolNames: string[] = [];
+
+  // 적응형 간격 계산
+  const getInterval = () => {
+    if (updateCount === 0) return STREAM_INTERVAL.FIRST_MS;
+    if (updateCount <= STREAM_INTERVAL.FAST_COUNT) return STREAM_INTERVAL.FAST_MS;
+    return STREAM_INTERVAL.NORMAL_MS;
+  };
+  
+  // 도구 실행 시간이 길어지면 추가 피드백
+  let toolTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  const startToolTimeout = async () => {
+    toolTimeoutId = setTimeout(async () => {
+      if (currentPhase === "tools" && currentToolNames.length > 0) {
+        const elapsed = Math.round((Date.now() - toolStartTime) / 1000);
+        const statusMsg = formatToolsStatus(currentToolNames);
+        try {
+          await ctx.api.editMessageText(
+            chatId, 
+            messageId, 
+            `${statusMsg}\n⏳ ${elapsed}초 경과... 조금만 기다려줘!`
+          );
+        } catch {
+          // 무시
+        }
+      }
+    }, 5000); // 5초 후 추가 피드백
+  };
+  
+  const clearToolTimeout = () => {
+    if (toolTimeoutId) {
+      clearTimeout(toolTimeoutId);
+      toolTimeoutId = null;
+    }
+  };
 
   try {
+    const streamCallbacks: StreamCallbacks = {
+      onChunk: async (_chunk: string, accumulated: string) => {
+        // 첫 청크 도착 시 thinking → generating 단계 전환
+        if (currentPhase === "thinking" && accumulated.length > 0) {
+          currentPhase = "generating";
+        }
+        
+        const now = Date.now();
+        const interval = getInterval();
+        
+        // 간격 체크 + 실제 변경 있을 때만 업데이트
+        if (now - lastUpdate >= interval && accumulated !== lastText) {
+          // 텔레그램 제한 초과 시 잘라서 표시
+          const displayText = accumulated.length > MAX_MESSAGE_LENGTH - 10
+            ? accumulated.slice(0, MAX_MESSAGE_LENGTH - 20) + "\n…(계속)"
+            : accumulated;
+          
+          try {
+            await ctx.api.editMessageText(
+              chatId, 
+              messageId, 
+              displayText + " " + STREAM_ICONS.TYPING
+            );
+            lastUpdate = now;
+            lastText = accumulated;
+            updateCount++;
+          } catch {
+            // rate limit 등 무시 - 다음 chunk에서 재시도
+          }
+        }
+      },
+      onToolStart: async (toolNames: string[]) => {
+        currentPhase = "tools";
+        currentToolNames = toolNames;
+        toolStartTime = Date.now();
+        
+        // 친화적인 도구 상태 메시지 생성
+        const statusMsg = formatToolsStatus(toolNames);
+        
+        try {
+          await ctx.api.editMessageText(chatId, messageId, statusMsg);
+        } catch {
+          // 무시
+        }
+        
+        // 5초 후 추가 피드백 예약
+        startToolTimeout();
+      },
+    };
+    
     const result = await chatSmart(
       messages,
       systemPrompt,
       modelId,
       thinkingLevel,
-      async (_chunk: string, accumulated: string) => {
-        const now = Date.now();
-        // 0.5초마다 또는 충분히 변경되었을 때 업데이트
-        if (now - lastUpdate > UPDATE_INTERVAL && accumulated !== lastText) {
-          try {
-            await ctx.api.editMessageText(chatId, messageId, accumulated + " ▌");
-            lastUpdate = now;
-            lastText = accumulated;
-          } catch {
-            // rate limit 등 무시
-          }
-        }
-      }
+      streamCallbacks
     );
+    
+    // 도구 타임아웃 정리
+    clearToolTimeout();
 
-    // 도구를 사용한 경우 스트리밍이 안됐으므로 새 응답 전송
+    // 도구를 사용한 경우 
     if (result.usedTools) {
-      // placeholder 메시지를 최종 결과로 교체
+      // 도구 사용 정보를 친화적으로 표시
+      const toolSummary = result.toolsUsed.map(t => {
+        const status = getToolStatusMessage(t.name);
+        return `${status.icon} ${status.text}`;
+      }).join("\n");
+      
+      const toolIndicator = `${toolSummary}\n\n`;
+      const finalText = toolIndicator + result.text;
+      
+      // 긴 응답 분할 처리
+      const parts = splitLongMessage(finalText);
+      
       try {
-        await ctx.api.editMessageText(chatId, messageId, result.text);
+        // 첫 번째 파트로 placeholder 교체
+        await ctx.api.editMessageText(chatId, messageId, parts[0]);
+        
+        // 추가 파트가 있으면 새 메시지로 전송
+        for (let i = 1; i < parts.length; i++) {
+          await ctx.reply(parts[i]);
+        }
       } catch {
-        // 실패시 새 메시지로 전송
-        await ctx.api.deleteMessage(chatId, messageId);
-        await ctx.reply(result.text);
+        // 실패시 placeholder 삭제 후 새로 전송
+        try { await ctx.api.deleteMessage(chatId, messageId); } catch {}
+        for (const part of parts) {
+          await ctx.reply(part);
+        }
       }
       return result.text;
     }
 
-    // 최종 메시지 업데이트 (커서 제거)
+    // 최종 메시지 업데이트 (커서 제거) + 긴 응답 분할
+    const parts = splitLongMessage(result.text);
+    
     try {
-      await ctx.api.editMessageText(chatId, messageId, result.text);
+      await ctx.api.editMessageText(chatId, messageId, parts[0]);
+      
+      // 추가 파트 전송
+      for (let i = 1; i < parts.length; i++) {
+        await ctx.reply(parts[i]);
+      }
     } catch {
       // 이미 동일 텍스트면 에러 발생 가능 - 무시
     }
 
     return result.text;
   } catch (error) {
+    // 도구 타임아웃 정리
+    clearToolTimeout();
+    
     // 에러 발생 시 placeholder 삭제
     try {
       await ctx.api.deleteMessage(chatId, messageId);
@@ -150,7 +377,9 @@ export function registerMessageHandlers(bot: Bot): void {
       const modelId = getModel(chatId);
       const thinkingLevel = getThinkingLevel(chatId);
 
-      await ctx.replyWithChatAction("typing");
+      // Typing indicator 시작 (긴 작업 동안 유지)
+      const typingIndicator = new TypingIndicator(ctx);
+      typingIndicator.start();
 
       try {
         // 가장 큰 사진 선택 (마지막이 가장 큼)
@@ -158,12 +387,14 @@ export function registerMessageHandlers(bot: Bot): void {
         const file = await ctx.api.getFile(photo.file_id);
 
         if (!file.file_path) {
+          typingIndicator.stop();
           await ctx.reply("사진을 가져올 수 없어.");
           return;
         }
 
         // 파일 크기 제한
         if (file.file_size && file.file_size > TELEGRAM.MAX_IMAGE_SIZE) {
+          typingIndicator.stop();
           const maxMb = Math.floor(TELEGRAM.MAX_IMAGE_SIZE / (1024 * 1024));
           await ctx.reply(`사진이 너무 커. ${maxMb}MB 이하로 보내줄래?`);
           return;
@@ -218,43 +449,35 @@ export function registerMessageHandlers(bot: Bot): void {
           // 토큰 기반 히스토리 트리밍
           trimHistoryByTokens(history);
 
+          typingIndicator.stop();
           await ctx.reply(result.text);
         } catch (innerError) {
+          typingIndicator.stop();
+          
           // 에러 발생해도 사용자 메시지는 보존 (대화 컨텍스트 유지)
           // 에러 응답을 assistant로 기록해서 role 교대 유지
-          const errorMsg = innerError instanceof Error ? innerError.message : String(innerError);
-          
-          let userErrorMsg: string;
-          if (errorMsg.includes("rate limit") || errorMsg.includes("429")) {
-            userErrorMsg = "지금 요청이 많아서 사진을 분석할 수 없어. 잠시 후 다시 보내줄래?";
-          } else if (errorMsg.includes("timeout")) {
-            userErrorMsg = "사진 분석이 너무 오래 걸렸어. 다시 보내줄래?";
-          } else {
-            userErrorMsg = "사진을 분석하다가 문제가 생겼어. 다시 보내줄래?";
-          }
+          const friendlyError = toUserFriendlyError(innerError);
+          const userErrorMsg = `사진 분석 중 ${friendlyError.userMessage}${friendlyError.suggestedAction ? ` ${friendlyError.suggestedAction}` : ""}`;
           
           history.push({ role: "assistant", content: `[응답 실패] ${userErrorMsg}` });
           persistence.appendMessage(chatId, "assistant", `[응답 실패] ${userErrorMsg}`);
           
           recordError();
-          console.error(`[Photo] chatId=${chatId} error:`, errorMsg);
+          console.error(`[Photo] chatId=${chatId} error:`, friendlyError.technicalMessage);
           await ctx.reply(userErrorMsg);
           return;
         }
       } catch (error) {
+        typingIndicator.stop();
+        
         // 이미지 다운로드 등 history.push() 전 에러는 그냥 응답만
         recordError();
         
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        console.error(`[Photo] chatId=${chatId} error:`, errorMsg);
+        const friendlyError = toUserFriendlyError(error);
+        console.error(`[Photo] chatId=${chatId} error:`, friendlyError.technicalMessage);
         
-        if (errorMsg.includes("rate limit") || errorMsg.includes("429")) {
-          await ctx.reply("지금 요청이 많아서 사진을 분석할 수 없어. 잠시 후 다시 보내줄래?");
-        } else if (errorMsg.includes("timeout")) {
-          await ctx.reply("사진 분석이 너무 오래 걸렸어. 다시 보내줄래?");
-        } else {
-          await ctx.reply("사진을 분석하다가 문제가 생겼어. 다시 보내줄래?");
-        }
+        const userErrorMsg = `사진 처리 중 ${friendlyError.userMessage}${friendlyError.suggestedAction ? ` ${friendlyError.suggestedAction}` : ""}`;
+        await ctx.reply(userErrorMsg);
       }
     });
   });
@@ -366,25 +589,19 @@ export function registerMessageHandlers(bot: Bot): void {
       } catch (error) {
         recordError();
         
-        // 구체적인 에러 로깅
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        console.error(`[Chat] chatId=${chatId} error:`, errorMsg);
+        // 에러를 사용자 친화적 메시지로 변환
+        const friendlyError = toUserFriendlyError(error);
+        console.error(`[Chat] chatId=${chatId} error:`, friendlyError.technicalMessage);
         
-        // 에러 응답을 assistant로 기록 (사용자 메시지 보존 + role 교대 유지)
-        // 이렇게 하면 에러 발생해도 대화 컨텍스트 유지됨
-        let userErrorMsg: string;
-        if (errorMsg.includes("rate limit") || errorMsg.includes("429")) {
-          userErrorMsg = "지금 요청이 많아서 잠깐 쉬어야 해. 30초 후에 다시 시도해줄래?";
-        } else if (errorMsg.includes("timeout") || errorMsg.includes("ETIMEDOUT")) {
-          userErrorMsg = "응답이 너무 오래 걸려서 중단됐어. 다시 시도해줄래?";
-        } else if (errorMsg.includes("context_length") || errorMsg.includes("too many tokens") || errorMsg.includes("maximum context")) {
-          userErrorMsg = "대화가 너무 길어졌어. /compact 로 정리하고 다시 시도해줘!";
-        } else {
-          userErrorMsg = `문제가 생겼어: ${errorMsg.slice(0, 100)}`;
-        }
+        // 사용자 메시지 구성
+        const userErrorMsg = friendlyError.suggestedAction
+          ? `${friendlyError.userMessage} ${friendlyError.suggestedAction}`
+          : friendlyError.userMessage;
         
         // 에러 메시지를 assistant 응답으로 기록 (히스토리 컨텍스트 유지) + JSONL 저장
-        addMessage(chatId, "assistant", `[응답 실패] ${userErrorMsg}`);
+        // 재시도 가능한 에러는 "[일시적 오류]"로, 아니면 "[응답 실패]"로 표시
+        const prefix = friendlyError.isRetryable ? "[일시적 오류]" : "[응답 실패]";
+        addMessage(chatId, "assistant", `${prefix} ${userErrorMsg}`);
         
         await ctx.reply(userErrorMsg);
       }

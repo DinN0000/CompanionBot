@@ -1,64 +1,33 @@
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { tools, executeTool } from "../tools/index.js";
-import { sleep } from "../utils/time.js";
 import { 
-  MAX_RETRIES, 
-  BASE_RETRY_DELAY_MS, 
   MAX_TOOL_ITERATIONS,
-  TOOL_RESULT_MAX_LENGTH,
   TOOL_INPUT_SUMMARY_LENGTH,
   TOOL_OUTPUT_SUMMARY_LENGTH,
 } from "../utils/constants.js";
+import {
+  withRetry,
+  withTimeout,
+  isTransientError,
+  formatErrorForUser,
+  type RetryOptions,
+} from "../utils/retry.js";
+import { getToolTimeout } from "../tools/timeout.js";
+import { compressToolResult } from "../tools/compress.js";
 
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  retries: number = MAX_RETRIES
-): Promise<T> {
-  let lastError: Error | null = null;
-  
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await fn();
-    } catch (error: unknown) {
-      // APIError 타입 체크
-      if (error instanceof APIError) {
-        lastError = error;
-        
-        // Rate limit (429)
-        if (error.status === 429) {
-          const retryAfter = error.headers?.["retry-after"];
-          const delay = retryAfter 
-            ? parseInt(retryAfter) * 1000 
-            : BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
-          
-          console.log(`[RateLimit] 429 received, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
-          await sleep(delay);
-          continue;
-        }
-        
-        // 서버 에러 (500+)
-        if (error.status >= 500) {
-          const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
-          console.log(`[ServerError] ${error.status}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
-          await sleep(delay);
-          continue;
-        }
-      }
-      
-      // 일반 Error 처리
-      if (error instanceof Error) {
-        lastError = error;
-      } else {
-        lastError = new Error(String(error));
-      }
-      
-      // 다른 에러는 바로 throw
-      throw error;
-    }
-  }
-  
-  throw lastError;
-}
+// API 호출 타임아웃 (2분) - Claude의 긴 응답 시간 고려
+const API_TIMEOUT_MS = 120000;
+
+// 재시도 설정
+const API_RETRY_OPTIONS: RetryOptions = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 30000,
+  onRetry: (attempt, error, delay) => {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.log(`[API Retry] Attempt ${attempt}, waiting ${delay}ms: ${errMsg.slice(0, 100)}`);
+  },
+};
 
 let anthropic: Anthropic | null = null;
 
@@ -246,7 +215,14 @@ export async function chat(
   };
 
   let response: Anthropic.Message;
-  response = await withRetry(() => client.messages.create(buildRequestParams()));
+  response = await withRetry(
+    () => withTimeout(
+      () => client.messages.create(buildRequestParams()),
+      API_TIMEOUT_MS,
+      "API 응답 시간 초과"
+    ),
+    API_RETRY_OPTIONS
+  );
 
   // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복
   let iterations = 0;
@@ -257,34 +233,62 @@ export async function chat(
       (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
     );
 
-    // 도구 실행 결과 수집
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-    for (const toolUse of toolUseBlocks) {
-      console.log(`[Tool] ${toolUse.name}:`, JSON.stringify(toolUse.input));
-
-      const result = await executeTool(
-        toolUse.name,
-        toolUse.input as Record<string, unknown>
-      );
-
-      // 결과가 너무 길면 자르기
-      const truncatedResult =
-        result.length > TOOL_RESULT_MAX_LENGTH
-          ? result.slice(0, TOOL_RESULT_MAX_LENGTH) + "\n... (truncated)"
-          : result;
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: toolUse.id,
-        content: truncatedResult,
-      });
-
-      // 도구 사용 기록 (히스토리 참조용)
+    // 도구 병렬 실행 (성능 최적화)
+    console.log(`[Tool] Executing ${toolUseBlocks.length} tool(s) in parallel`);
+    
+    const toolExecutions = await Promise.all(
+      toolUseBlocks.map(async (toolUse) => {
+        const startTime = Date.now();
+        console.log(`[Tool] ${toolUse.name}:`, JSON.stringify(toolUse.input).slice(0, 200));
+        
+        try {
+          // 도구별 타임아웃 적용
+          const timeout = getToolTimeout(toolUse.name);
+          const result = await Promise.race([
+            executeTool(toolUse.name, toolUse.input as Record<string, unknown>),
+            new Promise<string>((_, reject) => 
+              setTimeout(() => reject(new Error(`Tool ${toolUse.name} timed out after ${timeout}ms`)), timeout)
+            ),
+          ]);
+          
+          const elapsed = Date.now() - startTime;
+          console.log(`[Tool] ${toolUse.name} completed in ${elapsed}ms`);
+          
+          // 스마트 결과 압축
+          const compressedResult = compressToolResult(toolUse.name, result);
+          
+          return {
+            toolUse,
+            result: compressedResult,
+            success: true,
+          };
+        } catch (error) {
+          const elapsed = Date.now() - startTime;
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          console.error(`[Tool] ${toolUse.name} failed after ${elapsed}ms:`, errorMsg);
+          
+          return {
+            toolUse,
+            result: `Error: ${errorMsg}`,
+            success: false,
+          };
+        }
+      })
+    );
+    
+    // 결과 수집
+    const toolResults: Anthropic.ToolResultBlockParam[] = toolExecutions.map((exec) => ({
+      type: "tool_result" as const,
+      tool_use_id: exec.toolUse.id,
+      content: exec.result,
+    }));
+    
+    // 도구 사용 기록
+    for (const exec of toolExecutions) {
       toolsUsed.push({
-        name: toolUse.name,
-        input: JSON.stringify(toolUse.input).slice(0, TOOL_INPUT_SUMMARY_LENGTH),
-        output: truncatedResult.slice(0, TOOL_OUTPUT_SUMMARY_LENGTH),
+        name: exec.toolUse.name,
+        input: JSON.stringify(exec.toolUse.input).slice(0, TOOL_INPUT_SUMMARY_LENGTH),
+        output: exec.result.slice(0, TOOL_OUTPUT_SUMMARY_LENGTH),
       });
     }
 
@@ -300,7 +304,14 @@ export async function chat(
     });
 
     // 다음 응답 요청 (도구 루프에서도 thinking 유지)
-    response = await withRetry(() => client.messages.create(buildRequestParams()));
+    response = await withRetry(
+      () => withTimeout(
+        () => client.messages.create(buildRequestParams()),
+        API_TIMEOUT_MS,
+        "API 응답 시간 초과"
+      ),
+      API_RETRY_OPTIONS
+    );
   }
 
   // 반복 횟수 초과 시 경고
@@ -326,6 +337,11 @@ export type ChatSmartResult = {
   toolsUsed: ToolUseSummary[];
 };
 
+export type StreamCallbacks = {
+  onChunk?: (text: string, accumulated: string) => void | Promise<void>;
+  onToolStart?: (toolNames: string[]) => void | Promise<void>;
+};
+
 /**
  * 스마트 채팅 - 가능하면 스트리밍, 도구 필요하면 일반 호출
  * 
@@ -342,10 +358,14 @@ export async function chatSmart(
   systemPrompt: string,
   modelId: ModelId,
   thinkingLevel: ThinkingLevel = "medium",
-  onChunk?: (text: string, accumulated: string) => void | Promise<void>
+  onChunk?: ((text: string, accumulated: string) => void | Promise<void>) | StreamCallbacks
 ): Promise<ChatSmartResult> {
+  // 콜백 정규화
+  const callbacks: StreamCallbacks = typeof onChunk === 'function' 
+    ? { onChunk } 
+    : (onChunk ?? {});
   // 스트리밍 콜백이 없으면 그냥 일반 chat 사용
-  if (!onChunk) {
+  if (!callbacks.onChunk) {
     const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
     return { text: result.text, usedTools: result.toolsUsed.length > 0, toolsUsed: result.toolsUsed };
   }
@@ -408,7 +428,7 @@ export async function chatSmart(
       streamingStarted = true;
       accumulated += text;
       try {
-        await onChunk(text, accumulated);
+        await callbacks.onChunk!(text, accumulated);
       } catch (err) {
         // editMessageText 실패 등은 무시하고 계속
         console.warn("[Stream] Chunk callback error (ignored):", err);
@@ -423,6 +443,21 @@ export async function chatSmart(
     // 주의: chat()은 내부에서 withRetry를 사용하므로 여기서 추가 재시도 불필요
     if (stopReason === "tool_use") {
       console.log("[Stream] Tool use detected, falling back to chat()");
+      
+      // 도구 이름 추출하여 콜백 호출
+      const toolUseBlocks = finalMessage.content.filter(
+        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+      );
+      const toolNames = toolUseBlocks.map(t => t.name);
+      
+      if (callbacks.onToolStart && toolNames.length > 0) {
+        try {
+          await callbacks.onToolStart(toolNames);
+        } catch (err) {
+          console.warn("[Stream] Tool start callback error (ignored):", err);
+        }
+      }
+      
       const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
       return { text: result.text, usedTools: true, toolsUsed: result.toolsUsed };
     }

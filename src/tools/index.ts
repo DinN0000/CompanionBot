@@ -1882,11 +1882,18 @@ Next run: ${nextRunStr}`;
   }
 }
 
-// 도구 설명 생성 (시스템 프롬프트용)
+// 도구 설명 캐시 (모델별)
+const toolsDescriptionCache = new Map<ModelId, string>();
+
+// 도구 설명 생성 (시스템 프롬프트용) - 캐시됨
 export function getToolsDescription(modelId: ModelId): string {
+  // 캐시 확인
+  const cached = toolsDescriptionCache.get(modelId);
+  if (cached) return cached;
+
   const model = MODELS[modelId];
 
-  return `# 사용 가능한 도구
+  const description = `# 사용 가능한 도구
 
 현재 모델: ${model.name}
 
@@ -1958,4 +1965,8 @@ export function getToolsDescription(modelId: ModelId): string {
 - memory_reindex: 메모리 파일 재인덱싱
 
 허용된 경로: ${path.join(home, "Documents")}, ${path.join(home, "projects")}, 워크스페이스`;
+
+  // 캐시에 저장
+  toolsDescriptionCache.set(modelId, description);
+  return description;
 }

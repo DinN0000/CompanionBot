@@ -5,6 +5,16 @@
  */
 
 import { Bot } from "grammy";
+import { getWarmupStatus, type WarmupResult } from "../warmup.js";
+
+/**
+ * 워밍업 상태 정보
+ */
+export interface WarmupStatus {
+  complete: boolean;
+  inProgress: boolean;
+  result: WarmupResult | null;
+}
 
 /**
  * 봇의 건강 상태 정보
@@ -20,6 +30,8 @@ interface HealthStatus {
   errorCount: number;
   /** 건강 상태 여부 (30분 이상 비활성이면 false) */
   isHealthy: boolean;
+  /** 워밍업 상태 */
+  warmup: WarmupStatus;
 }
 
 let startTime = Date.now();
@@ -60,7 +72,8 @@ export function getHealthStatus(): HealthStatus {
     lastActivity,
     messageCount,
     errorCount,
-    isHealthy
+    isHealthy,
+    warmup: getWarmupStatus(),
   };
 }
 

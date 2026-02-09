@@ -784,11 +784,24 @@ export function registerCommands(bot: Bot): void {
   // /health 명령어 - 봇 상태 확인
   bot.command("health", async (ctx) => {
     const status = getHealthStatus();
+    
+    // Warmup 상태 문자열
+    let warmupStr = "⏳ 진행 중...";
+    if (status.warmup.complete && status.warmup.result) {
+      const r = status.warmup.result;
+      warmupStr = r.success 
+        ? `✅ ${r.total}ms (임베딩: ${r.embedding}ms)`
+        : `⚠️ ${r.errors.length}개 오류`;
+    } else if (!status.warmup.inProgress) {
+      warmupStr = "❓ 미시작";
+    }
+    
     await ctx.reply(
       `🏥 봇 상태\n\n` +
       `⏱ 가동: ${formatUptime(status.uptime)}\n` +
       `💬 메시지: ${status.messageCount}개\n` +
       `❌ 에러: ${status.errorCount}개\n` +
+      `🚀 Warmup: ${warmupStr}\n` +
       `🔋 상태: ${status.isHealthy ? "정상 ✅" : "점검 필요 ⚠️"}`
     );
   });

@@ -1,10 +1,10 @@
 // Memory module exports
 
 // Embeddings
-export { embed, embedBatch, cosineSimilarity } from "./embeddings.js";
+export { embed, embedBatch, cosineSimilarity, preloadEmbeddingModel } from "./embeddings.js";
 
 // Vector store
-export { search, invalidateCache, loadAllMemoryChunks } from "./vectorStore.js";
+export { search, invalidateCache, loadAllMemoryChunks, preloadVectorStore } from "./vectorStore.js";
 export type { MemoryChunk, SearchResult } from "./vectorStore.js";
 
 // FTS index

@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import { randomBytes } from "crypto";
+import { getHealthStatus, formatUptime } from "../../health/index.js";
 import { chat, MODELS, type ModelId, type Message } from "../../ai/claude.js";
 import { estimateMessagesTokens } from "../../utils/tokens.js";
 
@@ -735,5 +736,17 @@ export function registerCommands(bot: Bot): void {
         `"10분마다 체크해줘"로 간격 변경 가능`
       );
     }
+  });
+
+  // /health 명령어 - 봇 상태 확인
+  bot.command("health", async (ctx) => {
+    const status = getHealthStatus();
+    await ctx.reply(
+      `🏥 봇 상태\n\n` +
+      `⏱ 가동: ${formatUptime(status.uptime)}\n` +
+      `💬 메시지: ${status.messageCount}개\n` +
+      `❌ 에러: ${status.errorCount}개\n` +
+      `🔋 상태: ${status.isHealthy ? "정상 ✅" : "점검 필요 ⚠️"}`
+    );
   });
 }

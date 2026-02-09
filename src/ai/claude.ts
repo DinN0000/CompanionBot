@@ -1,6 +1,54 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { tools, executeTool } from "../tools/index.js";
 
+// 재시도 설정
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries: number = MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      
+      // Rate limit (429)
+      if (error.status === 429) {
+        const retryAfter = error.headers?.["retry-after"];
+        const delay = retryAfter 
+          ? parseInt(retryAfter) * 1000 
+          : BASE_DELAY_MS * Math.pow(2, attempt);
+        
+        console.log(`[RateLimit] 429 received, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
+        await sleep(delay);
+        continue;
+      }
+      
+      // 서버 에러 (500+)
+      if (error.status >= 500) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        console.log(`[ServerError] ${error.status}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
+        await sleep(delay);
+        continue;
+      }
+      
+      // 다른 에러는 바로 throw
+      throw error;
+    }
+  }
+  
+  throw lastError;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 let anthropic: Anthropic | null = null;
 
 function getClient(): Anthropic {
@@ -91,19 +139,7 @@ export async function chat(
   };
 
   let response: Anthropic.Message;
-  try {
-    response = await client.messages.create(buildRequestParams());
-  } catch (error) {
-    if (error instanceof Anthropic.APIError) {
-      if (error.status === 429) {
-        throw new Error("API 요청이 너무 많아. 잠시 후 다시 시도해줘.");
-      }
-      if (error.status >= 500) {
-        throw new Error("AI 서버에 문제가 생겼어. 잠시 후 다시 시도해줘.");
-      }
-    }
-    throw error;
-  }
+  response = await withRetry(() => client.messages.create(buildRequestParams()));
 
   // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복 (최대 10회)
   const MAX_TOOL_ITERATIONS = 10;
@@ -151,19 +187,7 @@ export async function chat(
     });
 
     // 다음 응답 요청 (도구 루프에서도 thinking 유지)
-    try {
-      response = await client.messages.create(buildRequestParams());
-    } catch (error) {
-      if (error instanceof Anthropic.APIError) {
-        if (error.status === 429) {
-          throw new Error("API 요청이 너무 많아. 잠시 후 다시 시도해줘.");
-        }
-        if (error.status >= 500) {
-          throw new Error("AI 서버에 문제가 생겼어. 잠시 후 다시 시도해줘.");
-        }
-      }
-      throw error;
-    }
+    response = await withRetry(() => client.messages.create(buildRequestParams()));
   }
 
   // 반복 횟수 초과 시 경고
@@ -228,7 +252,10 @@ export async function chatSmart(
   let accumulated = "";
   let stopReason: string | null = null;
 
-  try {
+  // 스트리밍에 withRetry 적용 - 실패 시 자동 재시도
+  return await withRetry(async () => {
+    accumulated = ""; // 재시도 시 초기화
+    
     const stream = client.messages.stream(params);
 
     // 스트리밍 이벤트 처리
@@ -255,31 +282,5 @@ export async function chatSmart(
 
     // 성공적으로 스트리밍 완료
     return { text: accumulated, usedTools: false };
-
-  } catch (error) {
-    // 스트리밍 에러 핸들링
-    if (error instanceof Anthropic.APIError) {
-      if (error.status === 429) {
-        throw new Error("API 요청이 너무 많아. 잠시 후 다시 시도해줘.");
-      }
-      if (error.status >= 500) {
-        throw new Error("AI 서버에 문제가 생겼어. 잠시 후 다시 시도해줘.");
-      }
-    }
-
-    // 연결 끊김 등 스트리밍 에러 - 이미 받은 내용이 있으면 반환 시도
-    if (accumulated.length > 50) {
-      console.warn("[Stream] Connection error, returning partial response");
-      return { text: accumulated + "\n\n(연결이 끊겨서 응답이 잘렸을 수 있어)", usedTools: false };
-    }
-
-    // 응답이 거의 없으면 일반 chat으로 재시도
-    console.warn("[Stream] Connection error, retrying with chat()");
-    try {
-      const text = await chat(messages, systemPrompt, modelId);
-      return { text, usedTools: false };
-    } catch (retryError) {
-      throw retryError;
-    }
-  }
+  });
 }

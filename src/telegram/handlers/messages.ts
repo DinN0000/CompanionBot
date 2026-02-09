@@ -1,5 +1,6 @@
 import type { Bot, Context } from "grammy";
 import { chat, chatSmart, type Message, type ModelId } from "../../ai/claude.js";
+import { recordActivity, recordError } from "../../health/index.js";
 import {
   getHistory,
   getModel,
@@ -12,6 +13,45 @@ import {
   fetchWebContent,
   buildSystemPrompt,
 } from "../utils/index.js";
+import { estimateMessagesTokens } from "../../utils/tokens.js";
+
+const MAX_CONTEXT_TOKENS = 100000; // Claude 컨텍스트
+const COMPACTION_THRESHOLD = 0.6; // 60%
+
+/**
+ * 토큰 사용량이 임계치를 넘으면 자동으로 히스토리 압축
+ */
+async function autoCompactIfNeeded(
+  ctx: Context,
+  history: Message[]
+): Promise<void> {
+  const tokens = estimateMessagesTokens(history);
+  const usage = tokens / MAX_CONTEXT_TOKENS;
+
+  if (usage > COMPACTION_THRESHOLD && history.length > 6) {
+    // 자동 compaction 실행
+    console.log(`[AutoCompact] Usage ${(usage * 100).toFixed(1)}% - compacting...`);
+
+    // 앞부분 요약 생성 (최근 4개 메시지 제외)
+    const oldMessages = history.slice(0, -4);
+    const summaryPrompt =
+      "다음 대화를 3-4문장으로 요약해줘:\n\n" +
+      oldMessages
+        .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[media]"}`)
+        .join("\n");
+
+    const summary = await chat([{ role: "user", content: summaryPrompt }], "", "haiku");
+
+    // 히스토리 교체
+    const recentMessages = history.slice(-4);
+    history.splice(0, history.length);
+    history.push({ role: "user", content: `[이전 대화 요약]\n${summary}` });
+    history.push(...recentMessages);
+
+    const newTokens = estimateMessagesTokens(history);
+    await ctx.reply(`📦 자동 정리: ${tokens} → ${newTokens} 토큰`);
+  }
+}
 
 /**
  * 스트리밍 응답 전송 (Telegram 메시지 실시간 업데이트)
@@ -82,6 +122,7 @@ export function registerMessageHandlers(bot: Bot): void {
     const chatId = ctx.chat.id;
     
     await runWithChatId(chatId, async () => {
+      recordActivity();
       const history = getHistory(chatId);
       const modelId = getModel(chatId);
 
@@ -147,6 +188,7 @@ export function registerMessageHandlers(bot: Bot): void {
           throw innerError;
         }
       } catch (error) {
+        recordError();
         console.error("Photo error:", error);
         await ctx.reply("사진 분석 중 오류가 발생했어.");
       }
@@ -162,6 +204,9 @@ export function registerMessageHandlers(bot: Bot): void {
     if (!userMessage.trim()) return;
 
     await runWithChatId(chatId, async () => {
+      // Health 추적: 활동 기록
+      recordActivity();
+      
       // Heartbeat 마지막 대화 시간 업데이트
       updateLastMessageTime(chatId);
 
@@ -210,9 +255,13 @@ export function registerMessageHandlers(bot: Bot): void {
 
         // 토큰 기반 히스토리 트리밍
         trimHistoryByTokens(history);
+
+        // 자동 compaction 체크
+        await autoCompactIfNeeded(ctx, history);
       } catch (error) {
         // 에러 시 방금 추가한 사용자 메시지 롤백 (히스토리 오염 방지)
         history.pop();
+        recordError();
         console.error("Chat error:", error);
         await ctx.reply("뭔가 잘못됐어. 다시 시도해줄래?");
       }

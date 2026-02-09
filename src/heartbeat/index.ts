@@ -4,6 +4,7 @@ import { getWorkspacePath } from "../workspace/index.js";
 import { chat, type ModelId } from "../ai/claude.js";
 import { isCalendarConfigured, getTodayEvents, formatEvent } from "../calendar/index.js";
 import { getSecret } from "../config/secrets.js";
+import { checkForUpdates } from "../updates/index.js";
 
 type HeartbeatConfig = {
   chatId: number;
@@ -23,6 +24,11 @@ const activeTimers: Map<number, NodeJS.Timeout> = new Map();
 // 메모리 캐시: 타임스탬프는 메모리에만 유지하여 파일 쓰기 최소화
 // lastCheckAt, lastMessageAt은 디버깅 용도라 매번 저장할 필요 없음
 const timestampCache: Map<number, { lastCheckAt: number; lastMessageAt: number }> = new Map();
+
+// 업데이트 체크 캐시 (하루에 한 번만)
+let lastUpdateCheck = 0;
+let cachedUpdateInfo: { hasUpdate: boolean; current: string; latest: string } | null = null;
+const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24시간
 
 // 봇 인스턴스
 let botInstance: { api: { sendMessage: (chatId: number, text: string) => Promise<unknown> } } | null = null;
@@ -99,6 +105,22 @@ async function gatherContext(): Promise<string> {
     } catch {
       // 무시
     }
+  }
+
+  // 업데이트 체크 (하루에 한 번)
+  const timeSinceLastCheck = Date.now() - lastUpdateCheck;
+  if (timeSinceLastCheck > UPDATE_CHECK_INTERVAL) {
+    try {
+      cachedUpdateInfo = await checkForUpdates();
+      lastUpdateCheck = Date.now();
+      console.log(`[Heartbeat] Update check: current=${cachedUpdateInfo.current}, latest=${cachedUpdateInfo.latest}`);
+    } catch (error) {
+      console.error("[Heartbeat] Update check failed:", error);
+    }
+  }
+
+  if (cachedUpdateInfo?.hasUpdate) {
+    parts.push(`🆕 업데이트 알림: CompanionBot ${cachedUpdateInfo.latest} 버전이 출시됨! (현재: ${cachedUpdateInfo.current})`);
   }
 
   return parts.join("\n");

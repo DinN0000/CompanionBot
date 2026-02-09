@@ -60,37 +60,54 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
 └──────────────────────────────────────────────────────────────┘
 `);
 
-    let selectedValues: string[] = [];
+    const features: FeatureSelection = {
+      webSearch: false,
+      calendar: false,
+      weather: false,
+    };
+
+    let wantExtras: boolean;
     try {
-      selectedValues = await checkbox({
-        message: "추가 기능 선택 (Space=선택, Enter=확정, 그냥 Enter=건너뛰기)",
-        choices: [
-          { 
-            name: "🔍 웹 검색 - 최신 정보 검색 (Brave API, 무료 2000/월)", 
-            value: "webSearch" 
-          },
-          { 
-            name: "📅 캘린더 - Google Calendar 일정 확인/추가", 
-            value: "calendar" 
-          },
-          { 
-            name: "🌤️  날씨 - 현재 날씨, 브리핑 (OpenWeatherMap, 무료)", 
-            value: "weather" 
-          },
-        ],
+      wantExtras = await confirm({
+        message: "추가 기능을 설정하시겠습니까?",
+        default: false,
       });
     } catch {
-      // Ctrl+C 등으로 취소
       console.log("\n👋 설정을 취소했습니다.");
       rl.close();
       return false;
     }
 
-    const features: FeatureSelection = {
-      webSearch: selectedValues.includes("webSearch"),
-      calendar: selectedValues.includes("calendar"),
-      weather: selectedValues.includes("weather"),
-    };
+    if (wantExtras) {
+      let selectedValues: string[] = [];
+      try {
+        selectedValues = await checkbox({
+          message: "사용할 기능 선택 (Space=선택, Enter=확정)",
+          choices: [
+            { 
+              name: "🔍 웹 검색 - 최신 정보 검색 (Brave API, 무료 2000/월)", 
+              value: "webSearch" 
+            },
+            { 
+              name: "📅 캘린더 - Google Calendar 일정 확인/추가", 
+              value: "calendar" 
+            },
+            { 
+              name: "🌤️  날씨 - 현재 날씨, 브리핑 (OpenWeatherMap, 무료)", 
+              value: "weather" 
+            },
+          ],
+        });
+      } catch {
+        console.log("\n👋 설정을 취소했습니다.");
+        rl.close();
+        return false;
+      }
+
+      features.webSearch = selectedValues.includes("webSearch");
+      features.calendar = selectedValues.includes("calendar");
+      features.weather = selectedValues.includes("weather");
+    }
 
     // 선택 요약
     const selectedFeatures = [];

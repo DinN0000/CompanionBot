@@ -1,4 +1,5 @@
-import { google, calendar_v3 } from "googleapis";
+import { calendar_v3, calendar } from "@googleapis/calendar";
+import { OAuth2Client, Credentials as GoogleTokens } from "google-auth-library";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as http from "http";
@@ -9,7 +10,7 @@ const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 const REDIRECT_PORT = 3847;
 const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/oauth2callback`;
 
-type Credentials = {
+type OAuthCredentials = {
   client_id: string;
   client_secret: string;
 };
@@ -28,7 +29,7 @@ function getTokenPath(): string {
   return path.join(getWorkspacePath(), "google-token.json");
 }
 
-async function loadCredentials(): Promise<Credentials | null> {
+async function loadCredentials(): Promise<OAuthCredentials | null> {
   try {
     const data = await fs.readFile(getCredentialsPath(), "utf-8");
     return JSON.parse(data);
@@ -37,7 +38,7 @@ async function loadCredentials(): Promise<Credentials | null> {
   }
 }
 
-async function saveCredentials(creds: Credentials): Promise<void> {
+async function saveCredentials(creds: OAuthCredentials): Promise<void> {
   await fs.writeFile(getCredentialsPath(), JSON.stringify(creds, null, 2));
 }
 
@@ -88,7 +89,7 @@ export async function getAuthUrl(): Promise<string | null> {
   const creds = await loadCredentials();
   if (!creds) return null;
 
-  const oauth2Client = new google.auth.OAuth2(
+  const oauth2Client = new OAuth2Client(
     creds.client_id,
     creds.client_secret,
     REDIRECT_URI
@@ -148,7 +149,7 @@ export async function exchangeCodeForToken(code: string): Promise<boolean> {
   const creds = await loadCredentials();
   if (!creds) return false;
 
-  const oauth2Client = new google.auth.OAuth2(
+  const oauth2Client = new OAuth2Client(
     creds.client_id,
     creds.client_secret,
     REDIRECT_URI
@@ -173,7 +174,7 @@ export async function exchangeCodeForToken(code: string): Promise<boolean> {
 }
 
 // 인증된 클라이언트 가져오기
-async function getAuthClient() {
+async function getAuthClient(): Promise<OAuth2Client> {
   const creds = await loadCredentials();
   const token = await loadToken();
 
@@ -181,7 +182,7 @@ async function getAuthClient() {
     throw new Error("Calendar not configured. Use /calendar_setup");
   }
 
-  const oauth2Client = new google.auth.OAuth2(
+  const oauth2Client = new OAuth2Client(
     creds.client_id,
     creds.client_secret,
     REDIRECT_URI
@@ -194,7 +195,7 @@ async function getAuthClient() {
   });
 
   // 토큰 자동 갱신
-  oauth2Client.on("tokens", async (newTokens) => {
+  oauth2Client.on("tokens", async (newTokens: GoogleTokens) => {
     if (newTokens.access_token) {
       const currentToken = await loadToken();
       if (currentToken) {
@@ -213,12 +214,13 @@ async function getAuthClient() {
 // 캘린더 API 인스턴스
 async function getCalendar(): Promise<calendar_v3.Calendar> {
   const auth = await getAuthClient();
-  return google.calendar({ version: "v3", auth });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return calendar({ version: "v3", auth: auth as any });
 }
 
 // 오늘 일정 조회
 export async function getTodayEvents(): Promise<calendar_v3.Schema$Event[]> {
-  const calendar = await getCalendar();
+  const cal = await getCalendar();
 
   const now = new Date();
   const startOfDay = new Date(now);
@@ -227,7 +229,7 @@ export async function getTodayEvents(): Promise<calendar_v3.Schema$Event[]> {
   const endOfDay = new Date(now);
   endOfDay.setHours(23, 59, 59, 999);
 
-  const response = await calendar.events.list({
+  const response = await cal.events.list({
     calendarId: "primary",
     timeMin: startOfDay.toISOString(),
     timeMax: endOfDay.toISOString(),
@@ -243,9 +245,9 @@ export async function getEvents(
   startDate: Date,
   endDate: Date
 ): Promise<calendar_v3.Schema$Event[]> {
-  const calendar = await getCalendar();
+  const cal = await getCalendar();
 
-  const response = await calendar.events.list({
+  const response = await cal.events.list({
     calendarId: "primary",
     timeMin: startDate.toISOString(),
     timeMax: endDate.toISOString(),
@@ -264,7 +266,7 @@ export async function addEvent(
   endTime?: Date,
   description?: string
 ): Promise<calendar_v3.Schema$Event> {
-  const calendar = await getCalendar();
+  const cal = await getCalendar();
 
   // 종료 시간이 없으면 1시간 후
   const end = endTime || new Date(startTime.getTime() + 60 * 60 * 1000);
@@ -282,7 +284,7 @@ export async function addEvent(
     },
   };
 
-  const response = await calendar.events.insert({
+  const response = await cal.events.insert({
     calendarId: "primary",
     requestBody: event,
   });
@@ -293,8 +295,8 @@ export async function addEvent(
 // 일정 삭제
 export async function deleteEvent(eventId: string): Promise<boolean> {
   try {
-    const calendar = await getCalendar();
-    await calendar.events.delete({
+    const cal = await getCalendar();
+    await cal.events.delete({
       calendarId: "primary",
       eventId,
     });

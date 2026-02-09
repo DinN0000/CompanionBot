@@ -10,6 +10,8 @@ import type { CronJob, SystemEventPayload, AgentTurnPayload, Payload, CreateJobO
 import { getDueJobs, markJobExecuted, loadJobs, addJob, removeJob, updateJob, getJobsByChat } from "./store.js";
 import { chat, type Message, type ModelId } from "../ai/claude.js";
 import { buildSystemPrompt } from "../telegram/utils/prompt.js";
+import { INTERVAL_1_MINUTE } from "../utils/time.js";
+import { TELEGRAM_SAFE_LIMIT } from "../utils/constants.js";
 
 // Scheduler state
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
@@ -50,7 +52,7 @@ export class CronScheduler {
       this.checkAndRun().catch((err: Error) =>
         console.error("[CronScheduler] Check failed:", err)
       );
-    }, 60 * 1000); // 1 minute
+    }, INTERVAL_1_MINUTE);
 
     console.log("[CronScheduler] Started - checking every minute");
   }
@@ -211,20 +213,23 @@ async function executeAgentTurn(
     const response = await chat(messages, systemPrompt, "sonnet");
 
     // Send the response to the chat
-    if (response && response.trim()) {
+    const trimmedResponse = response?.trim();
+    if (trimmedResponse) {
       // Split long messages (Telegram limit is 4096 characters)
-      const maxLength = 4000;
-      if (response.length <= maxLength) {
-        await bot.api.sendMessage(job.chatId, response, {
+      const maxLength = TELEGRAM_SAFE_LIMIT;
+      if (trimmedResponse.length <= maxLength) {
+        await bot.api.sendMessage(job.chatId, trimmedResponse, {
           parse_mode: "Markdown",
         });
       } else {
         // Split into multiple messages
-        const chunks = splitMessage(response, maxLength);
+        const chunks = splitMessage(trimmedResponse, maxLength);
         for (const chunk of chunks) {
-          await bot.api.sendMessage(job.chatId, chunk, {
-            parse_mode: "Markdown",
-          });
+          if (chunk) {
+            await bot.api.sendMessage(job.chatId, chunk, {
+              parse_mode: "Markdown",
+            });
+          }
         }
       }
     }
@@ -248,7 +253,12 @@ async function executeAgentTurn(
 /**
  * Split a long message into chunks
  */
-function splitMessage(text: string, maxLength: number): string[] {
+function splitMessage(text: string | null | undefined, maxLength: number): string[] {
+  // null/undefined/빈 문자열 처리
+  if (!text || text.trim().length === 0) {
+    return [];
+  }
+
   const chunks: string[] = [];
   let remaining = text;
 

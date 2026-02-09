@@ -21,6 +21,17 @@ const sessions = new Map<number, SessionData>();
 const chatIdStorage = new AsyncLocalStorage<number>();
 
 function getSession(chatId: number): SessionData {
+  // chatId 유효성 검사
+  if (chatId == null || isNaN(chatId)) {
+    console.warn(`[Session] Invalid chatId: ${chatId}, using fallback session`);
+    // 임시 세션 반환 (저장하지 않음)
+    return {
+      history: [],
+      model: "sonnet",
+      lastAccessedAt: Date.now(),
+    };
+  }
+
   const existing = sessions.get(chatId);
   const now = Date.now();
 
@@ -64,14 +75,22 @@ function cleanupSessions(): void {
 }
 
 export function getHistory(chatId: number): Message[] {
-  return getSession(chatId).history;
+  const session = getSession(chatId);
+  // 참조 반환 (외부 수정 허용 - 의도적)
+  // 필요시 [...session.history]로 복사본 반환 가능
+  return session.history ?? [];
 }
 
 /**
  * 히스토리를 토큰 기반으로 트리밍한다.
  * 최대 토큰 한도를 초과하면 가장 오래된 메시지부터 제거 (최소 2개는 유지).
  */
-export function trimHistoryByTokens(history: Message[]): void {
+export function trimHistoryByTokens(history: Message[] | null | undefined): void {
+  // null/undefined/빈 배열 처리
+  if (!history || history.length === 0) {
+    return;
+  }
+  
   while (estimateMessagesTokens(history) > MAX_HISTORY_TOKENS && history.length > 2) {
     history.shift();
   }

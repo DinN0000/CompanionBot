@@ -10,6 +10,13 @@ export function extractUrls(text: string): string[] {
 
 /**
  * URL 안전성 검사 (SSRF 방지)
+ * 
+ * 차단 대상:
+ * - 모든 사설 IPv4 (10.x, 172.16-31.x, 192.168.x, 127.x, 0.x, 169.254.x)
+ * - 모든 사설/특수 IPv6 (::1, fe80::, fd00::/8, fc00::/7)
+ * - IPv4-mapped IPv6 (::ffff:127.0.0.1 등)
+ * - 클라우드 메타데이터 엔드포인트
+ * - .local, .internal 도메인
  */
 export function isSafeUrl(url: string): boolean {
   try {
@@ -22,23 +29,53 @@ export function isSafeUrl(url: string): boolean {
 
     const hostname = parsed.hostname.toLowerCase();
 
-    // 로컬/내부 네트워크 차단
+    // localhost 및 특수 도메인 차단
     if (
       hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "0.0.0.0" ||
-      hostname.startsWith("192.168.") ||
-      hostname.startsWith("10.") ||
+      hostname === "localhost.localdomain" ||
       hostname.endsWith(".local") ||
       hostname.endsWith(".internal") ||
-      hostname === "169.254.169.254" || // AWS/Cloud metadata
+      hostname.endsWith(".localhost")
+    ) {
+      return false;
+    }
+
+    // 클라우드 메타데이터 엔드포인트 차단
+    if (
+      hostname === "169.254.169.254" || // AWS/GCP/Azure metadata
+      hostname === "metadata.google.internal" ||
       (hostname.endsWith(".amazonaws.com") && hostname.includes("metadata"))
     ) {
       return false;
     }
 
-    // 172.16.0.0/12 (172.16.x.x ~ 172.31.x.x) 정확히 차단
-    if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)) {
+    // IPv4 사설 주소 차단
+    const ipv4PrivatePatterns = [
+      /^127\./, // 127.0.0.0/8 loopback
+      /^10\./, // 10.0.0.0/8
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
+      /^192\.168\./, // 192.168.0.0/16
+      /^0\./, // 0.0.0.0/8
+      /^169\.254\./, // link-local
+    ];
+
+    if (ipv4PrivatePatterns.some((p) => p.test(hostname))) {
+      return false;
+    }
+
+    // IPv6 사설/특수 주소 차단 (브라켓 제거 후 검사)
+    const ipv6Host = hostname.replace(/^\[|\]$/g, "");
+    const ipv6PrivatePatterns = [
+      /^::1$/, // loopback
+      /^fe80:/i, // link-local
+      /^fd[0-9a-f]{2}:/i, // unique local (fd00::/8)
+      /^fc[0-9a-f]{2}:/i, // unique local (fc00::/7)
+      /^::$/,  // unspecified
+      // IPv4-mapped IPv6 (::ffff:127.0.0.1 등)
+      /^::ffff:(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|0\.|169\.254\.)/i,
+    ];
+
+    if (ipv6PrivatePatterns.some((p) => p.test(ipv6Host))) {
       return false;
     }
 

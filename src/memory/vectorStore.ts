@@ -6,7 +6,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { getMemoryDirPath, getWorkspaceFilePath } from "../workspace/paths.js";
-import { embed, cosineSimilarity } from "./embeddings.js";
+import { embed, embedBatch, cosineSimilarity } from "./embeddings.js";
 
 export interface MemoryChunk {
   text: string;
@@ -128,9 +128,14 @@ export async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
   try {
     const chunks = await loadingPromise;
     // 캐시 업데이트 (임베딩은 아직 없음)
+    // 빈 결과도 캐시하되 TTL을 짧게 (1분)
     cachedChunks = chunks;
-    cacheTimestamp = Date.now();
+    cacheTimestamp = chunks.length > 0 ? Date.now() : Date.now() - CACHE_TTL_MS + 60000;
     return chunks;
+  } catch (error) {
+    // 로드 실패 시 캐시하지 않음
+    console.error("[VectorStore] Failed to load memory chunks:", error);
+    return [];
   } finally {
     loadingPromise = null;
   }
@@ -153,27 +158,44 @@ export async function search(
     return [];
   }
 
-  // 각 청크에 대해 임베딩 생성 및 유사도 계산
+  // 임베딩이 없는 청크들을 배치로 처리
+  const chunksNeedingEmbedding = chunks.filter(c => !c.embedding);
+  
+  if (chunksNeedingEmbedding.length > 0) {
+    try {
+      const texts = chunksNeedingEmbedding.map(c => c.text);
+      const embeddings = await embedBatch(texts);
+      
+      // 임베딩 할당
+      for (let i = 0; i < chunksNeedingEmbedding.length; i++) {
+        chunksNeedingEmbedding[i].embedding = embeddings[i];
+      }
+    } catch {
+      // 배치 실패 시 개별 처리 폴백
+      for (const chunk of chunksNeedingEmbedding) {
+        try {
+          chunk.embedding = await embed(chunk.text);
+        } catch {
+          // 개별 실패 무시
+        }
+      }
+    }
+  }
+
+  // 유사도 계산 및 필터링
   const results: SearchResult[] = [];
   
   for (const chunk of chunks) {
-    try {
-      // 캐시된 임베딩이 없으면 생성
-      if (!chunk.embedding) {
-        chunk.embedding = await embed(chunk.text);
-      }
-      
-      const score = cosineSimilarity(queryEmbedding, chunk.embedding);
-      
-      if (score >= minScore) {
-        results.push({
-          text: chunk.text,
-          source: chunk.source,
-          score,
-        });
-      }
-    } catch {
-      // 임베딩 실패 무시
+    if (!chunk.embedding) continue;
+    
+    const score = cosineSimilarity(queryEmbedding, chunk.embedding);
+    
+    if (score >= minScore) {
+      results.push({
+        text: chunk.text,
+        source: chunk.source,
+        score,
+      });
     }
   }
 

@@ -20,36 +20,42 @@ const COMPACTION_THRESHOLD = 0.6; // 60%
 
 /**
  * 토큰 사용량이 임계치를 넘으면 자동으로 히스토리 압축
+ * 실패해도 메시지 처리에 영향 없도록 에러를 조용히 처리
  */
 async function autoCompactIfNeeded(
   ctx: Context,
   history: Message[]
 ): Promise<void> {
-  const tokens = estimateMessagesTokens(history);
-  const usage = tokens / MAX_CONTEXT_TOKENS;
+  try {
+    const tokens = estimateMessagesTokens(history);
+    const usage = tokens / MAX_CONTEXT_TOKENS;
 
-  if (usage > COMPACTION_THRESHOLD && history.length > 6) {
-    // 자동 compaction 실행
-    console.log(`[AutoCompact] Usage ${(usage * 100).toFixed(1)}% - compacting...`);
+    if (usage > COMPACTION_THRESHOLD && history.length > 6) {
+      // 자동 compaction 실행
+      console.log(`[AutoCompact] chatId=${ctx.chat?.id} usage=${(usage * 100).toFixed(1)}% - compacting...`);
 
-    // 앞부분 요약 생성 (최근 4개 메시지 제외)
-    const oldMessages = history.slice(0, -4);
-    const summaryPrompt =
-      "다음 대화를 3-4문장으로 요약해줘:\n\n" +
-      oldMessages
-        .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[media]"}`)
-        .join("\n");
+      // 앞부분 요약 생성 (최근 4개 메시지 제외)
+      const oldMessages = history.slice(0, -4);
+      const summaryPrompt =
+        "다음 대화를 3-4문장으로 요약해줘:\n\n" +
+        oldMessages
+          .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[media]"}`)
+          .join("\n");
 
-    const summary = await chat([{ role: "user", content: summaryPrompt }], "", "haiku");
+      const summary = await chat([{ role: "user", content: summaryPrompt }], "", "haiku");
 
-    // 히스토리 교체
-    const recentMessages = history.slice(-4);
-    history.splice(0, history.length);
-    history.push({ role: "user", content: `[이전 대화 요약]\n${summary}` });
-    history.push(...recentMessages);
+      // 히스토리 교체
+      const recentMessages = history.slice(-4);
+      history.splice(0, history.length);
+      history.push({ role: "user", content: `[이전 대화 요약]\n${summary}` });
+      history.push(...recentMessages);
 
-    const newTokens = estimateMessagesTokens(history);
-    await ctx.reply(`📦 자동 정리: ${tokens} → ${newTokens} 토큰`);
+      const newTokens = estimateMessagesTokens(history);
+      await ctx.reply(`📦 자동 정리: ${tokens} → ${newTokens} 토큰`);
+    }
+  } catch (error) {
+    // 자동 압축 실패는 치명적이지 않음 - 로깅만 하고 계속 진행
+    console.warn(`[AutoCompact] Failed for chatId=${ctx.chat?.id}:`, error instanceof Error ? error.message : error);
   }
 }
 
@@ -189,8 +195,18 @@ export function registerMessageHandlers(bot: Bot): void {
         }
       } catch (error) {
         recordError();
-        console.error("Photo error:", error);
-        await ctx.reply("사진 분석 중 오류가 발생했어.");
+        
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.error(`[Photo] chatId=${chatId} error:`, errorMsg);
+        
+        // 사용자 친화적 에러 메시지
+        if (errorMsg.includes("rate limit") || errorMsg.includes("429")) {
+          await ctx.reply("지금 요청이 많아서 사진을 분석할 수 없어. 잠시 후 다시 보내줄래?");
+        } else if (errorMsg.includes("timeout")) {
+          await ctx.reply("사진 분석이 너무 오래 걸렸어. 다시 보내줄래?");
+        } else {
+          await ctx.reply("사진을 분석하다가 문제가 생겼어. 다시 보내줄래?");
+        }
       }
     });
   });
@@ -262,8 +278,21 @@ export function registerMessageHandlers(bot: Bot): void {
         // 에러 시 방금 추가한 사용자 메시지 롤백 (히스토리 오염 방지)
         history.pop();
         recordError();
-        console.error("Chat error:", error);
-        await ctx.reply("뭔가 잘못됐어. 다시 시도해줄래?");
+        
+        // 구체적인 에러 로깅
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.error(`[Chat] chatId=${chatId} error:`, errorMsg);
+        
+        // 사용자 친화적 에러 메시지
+        if (errorMsg.includes("rate limit") || errorMsg.includes("429")) {
+          await ctx.reply("지금 요청이 많아서 잠깐 쉬어야 해. 30초 후에 다시 시도해줄래?");
+        } else if (errorMsg.includes("timeout") || errorMsg.includes("ETIMEDOUT")) {
+          await ctx.reply("응답이 너무 오래 걸려서 중단됐어. 다시 시도해줄래?");
+        } else if (errorMsg.includes("context") || errorMsg.includes("token")) {
+          await ctx.reply("대화가 너무 길어졌어. /compact 로 정리하고 다시 시도해줘!");
+        } else {
+          await ctx.reply("메시지 처리 중 문제가 생겼어. 다시 시도해줄래?");
+        }
       }
     });
   });

@@ -8,15 +8,12 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { getWorkspacePath } from "../workspace/paths.js";
 import type { CronJob, CronStore, NewCronJob, Schedule } from "./types.js";
+import { sleep } from "../utils/time.js";
+import { LOCK_TIMEOUT_MS, LOCK_RETRY_MS, LOCK_MAX_RETRIES } from "../utils/constants.js";
 
 const CRON_FILE = "cron-jobs.json";
 const LOCK_FILE = "cron-jobs.lock";
 const STORE_VERSION = 1;
-
-// Lock configuration
-const LOCK_TIMEOUT_MS = 5000;
-const LOCK_RETRY_MS = 50;
-const LOCK_MAX_RETRIES = 100;
 
 function getCronFilePath(): string {
   return path.join(getWorkspacePath(), CRON_FILE);
@@ -81,10 +78,6 @@ async function releaseLock(): Promise<void> {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * Execute a function with file lock protection
  */
@@ -103,10 +96,39 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
 async function loadJobsInternal(): Promise<CronJob[]> {
   try {
     const data = await fs.readFile(getCronFilePath(), "utf-8");
+    
+    // 빈 파일 체크
+    if (!data || data.trim() === "") {
+      return [];
+    }
+    
     const store: CronStore = JSON.parse(data);
-    return store.jobs || [];
+    
+    // jobs 배열 유효성 검사
+    if (!store || !Array.isArray(store.jobs)) {
+      console.warn("[Cron] Invalid store format, returning empty array");
+      return [];
+    }
+    
+    return store.jobs;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    // JSON 파싱 오류
+    if (error instanceof SyntaxError) {
+      console.error("[Cron] Corrupted cron-jobs.json file:", error.message);
+      // 백업 파일 생성 시도
+      try {
+        const backupPath = `${getCronFilePath()}.corrupted.${Date.now()}`;
+        const data = await fs.readFile(getCronFilePath(), "utf-8").catch(() => "");
+        if (data) {
+          await fs.writeFile(backupPath, data, "utf-8");
+          console.log(`[Cron] Corrupted file backed up to: ${backupPath}`);
+        }
+      } catch {
+        // 백업 실패는 무시
+      }
       return [];
     }
     console.error("[Cron] Failed to load jobs:", error);
@@ -524,13 +546,24 @@ function getDaysInMonth(year: number, month: number): number {
  * Parse cron field like "1,3,5" or "1-5" or step values into array of numbers
  */
 function parseCronField(field: string, min: number, max: number): number[] {
-  if (field === "*") {
+  // 빈 문자열/null/undefined 처리
+  if (!field || field.trim() === "") {
+    return Array.from({ length: max - min + 1 }, (_, i) => i + min); // wildcard로 처리
+  }
+
+  const trimmedField = field.trim();
+  
+  if (trimmedField === "*") {
     return Array.from({ length: max - min + 1 }, (_, i) => i + min);
   }
 
   // Handle step values like */5
-  if (field.startsWith("*/")) {
-    const step = parseInt(field.slice(2), 10);
+  if (trimmedField.startsWith("*/")) {
+    const step = parseInt(trimmedField.slice(2), 10);
+    if (isNaN(step) || step <= 0) {
+      console.warn(`[Cron] Invalid step value in field: ${field}, using default`);
+      return Array.from({ length: max - min + 1 }, (_, i) => i + min);
+    }
     const values: number[] = [];
     for (let i = min; i <= max; i += step) {
       values.push(i);
@@ -539,40 +572,68 @@ function parseCronField(field: string, min: number, max: number): number[] {
   }
 
   const values: number[] = [];
-  const parts = field.split(",");
+  const parts = trimmedField.split(",");
 
   for (const part of parts) {
-    if (part.includes("-")) {
-      const [start, end] = part.split("-").map(Number);
-      for (let i = start; i <= end; i++) {
-        values.push(i);
+    const trimmedPart = part.trim();
+    if (!trimmedPart) continue;
+
+    if (trimmedPart.includes("-") && !trimmedPart.includes("/")) {
+      const [startStr, endStr] = trimmedPart.split("-");
+      const start = Number(startStr);
+      const end = Number(endStr);
+      if (!isNaN(start) && !isNaN(end)) {
+        for (let i = start; i <= end; i++) {
+          values.push(i);
+        }
       }
-    } else if (part.includes("/")) {
+    } else if (trimmedPart.includes("/")) {
       // Handle range with step like 0-30/5
-      const [range, stepStr] = part.split("/");
+      const [range, stepStr] = trimmedPart.split("/");
       const step = parseInt(stepStr, 10);
+      if (isNaN(step) || step <= 0) continue;
+      
       let rangeStart = min;
       let rangeEnd = max;
-      if (range.includes("-")) {
-        [rangeStart, rangeEnd] = range.split("-").map(Number);
+      if (range && range.includes("-")) {
+        const [rs, re] = range.split("-").map(Number);
+        if (!isNaN(rs)) rangeStart = rs;
+        if (!isNaN(re)) rangeEnd = re;
       }
       for (let i = rangeStart; i <= rangeEnd; i += step) {
         values.push(i);
       }
     } else {
-      values.push(parseInt(part, 10));
+      const num = parseInt(trimmedPart, 10);
+      if (!isNaN(num)) {
+        values.push(num);
+      }
     }
   }
 
-  return values.filter((v) => v >= min && v <= max);
+  // 유효한 값이 없으면 wildcard로 폴백
+  const filtered = values.filter((v) => v >= min && v <= max);
+  return filtered.length > 0 ? filtered : Array.from({ length: max - min + 1 }, (_, i) => i + min);
 }
 
 /**
  * Get all jobs for a specific chat
  */
-export async function getJobsByChat(chatId: number | string): Promise<CronJob[]> {
+export async function getJobsByChat(chatId: number | string | null | undefined): Promise<CronJob[]> {
+  // null/undefined 처리
+  if (chatId == null) {
+    return [];
+  }
+  
   const jobs = await loadJobs();
   const numericChatId = typeof chatId === "string" ? parseInt(chatId, 10) : chatId;
+  
+  // NaN 체크
+  if (isNaN(numericChatId)) {
+    console.warn(`[Cron] Invalid chatId: ${chatId}`);
+    return [];
+  }
+  
   return jobs.filter((j) => j.chatId === numericChatId);
 }
 

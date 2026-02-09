@@ -6,7 +6,7 @@
 
 CompanionBot은 Telegram에서 동작하는 AI 친구 봇입니다. Claude API를 사용하여 개인화된 대화를 제공합니다.
 
-**버전:** 0.4.0
+**버전:** 0.6.0
 
 ## 핵심 아키텍처
 
@@ -104,6 +104,22 @@ Cron 스케줄링:
 - `AsyncLocalStorage`로 chatId 관리 (race condition 방지)
 - `runWithChatId()`: 컨텍스트 주입
 - `getCurrentChatId()`: 현재 chatId 조회
+
+### src/memory/ (v0.6.0)
+시맨틱 메모리 검색:
+- `embeddings.ts`: 텍스트 임베딩 생성 (Xenova/Transformers)
+- `vectorStore.ts`: 벡터 저장 및 유사도 검색
+- `indexer.ts`: 메모리 파일 자동 인덱싱
+
+### src/health/ (v0.6.0)
+봇 상태 모니터링:
+- `recordActivity()`: 메시지 처리 기록
+- `getHealthStatus()`: uptime, 메시지/오류 수, 건강 상태
+
+### src/updates/ (v0.6.0)
+자동 업데이트 체크:
+- `checkForUpdates()`: npm 레지스트리에서 최신 버전 확인
+- `getCurrentVersion()`: 현재 설치된 버전
 
 ### src/config/secrets.ts
 OS 키체인에 시크릿 저장 (keytar):
@@ -229,4 +245,6 @@ Claude API rate limit 발생 시 잠시 대기 후 재시도
 - **v0.1.x**: 초기 릴리즈, 하드코딩 경로 수정
 - **v0.2.x**: 백그라운드 실행, sub-agent, web_search/fetch, edit_file
 - **v0.3.x**: Cron 스케줄링 시스템
-- **v0.4.x**: 보안 강화, 테스트 추가, 문서 개선
+- **v0.4.x**: 보안 강화 (TOCTOU, 심볼릭 링크 검증), 환경변수 설정
+- **v0.5.x**: 보안 강화 (SSRF 방지), 테스트 추가 (vitest)
+- **v0.6.x**: 시맨틱 메모리 검색 (임베딩/벡터), 헬스 체크, 업데이트 알림

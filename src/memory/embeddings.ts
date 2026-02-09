@@ -45,7 +45,12 @@ async function getEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
  * @param text 변환할 텍스트
  * @returns 384차원 임베딩 벡터
  */
-export async function embed(text: string): Promise<number[]> {
+export async function embed(text: string | null | undefined): Promise<number[]> {
+  // null/undefined 처리
+  if (text == null) {
+    return new Array(384).fill(0);
+  }
+
   const pipe = await getEmbeddingPipeline();
   
   // 텍스트 정규화
@@ -65,14 +70,27 @@ export async function embed(text: string): Promise<number[]> {
 
 /**
  * 여러 텍스트를 배치로 임베딩합니다.
+ * 병렬로 처리하여 성능 향상 (모델 내부에서 순차 처리되더라도 Promise 오버헤드 감소)
  * @param texts 변환할 텍스트 배열
  * @returns 임베딩 벡터 배열
  */
-export async function embedBatch(texts: string[]): Promise<number[][]> {
-  const results: number[][] = [];
-  for (const text of texts) {
-    results.push(await embed(text));
+export async function embedBatch(texts: (string | null | undefined)[]): Promise<number[][]> {
+  // null/undefined 배열 처리
+  if (!texts || texts.length === 0) return [];
+  if (texts.length === 1) return [await embed(texts[0])];
+  
+  // 동시성 제한 (메모리 보호)
+  const CONCURRENCY = 5;
+  const results: number[][] = new Array(texts.length);
+  
+  for (let i = 0; i < texts.length; i += CONCURRENCY) {
+    const batch = texts.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(batch.map(text => embed(text)));
+    for (let j = 0; j < batchResults.length; j++) {
+      results[i + j] = batchResults[j];
+    }
   }
+  
   return results;
 }
 
@@ -83,7 +101,9 @@ export async function embedBatch(texts: string[]): Promise<number[][]> {
  * 정규화된 벡터의 경우 코사인 유사도 = 내적 (norm이 1이므로)
  * normalized 파라미터가 true면 내적만 계산하여 성능 향상.
  */
-export function cosineSimilarity(a: number[], b: number[], normalized = true): number {
+export function cosineSimilarity(a: number[] | null | undefined, b: number[] | null | undefined, normalized = true): number {
+  // null/undefined 또는 빈 배열 처리
+  if (!a || !b || a.length === 0 || b.length === 0) return 0;
   if (a.length !== b.length) return 0;
   
   let dotProduct = 0;

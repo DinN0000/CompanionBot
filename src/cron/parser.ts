@@ -160,66 +160,100 @@ export function parseCronExpression(expr: string): ParsedCronExpression {
 
 /**
  * Calculate the next run time for a cron expression
+ * Returns null if no valid next run time is found (safer than throwing)
  */
 export function getNextCronRun(
-  expression: string,
+  expression: string | null | undefined,
   fromDate: Date = new Date(),
   timezone?: string
-): Date {
-  const parsed = parseCronExpression(expression);
-  const from = new Date(fromDate);
-  
-  // Start from the next minute
-  from.setSeconds(0);
-  from.setMilliseconds(0);
-  from.setMinutes(from.getMinutes() + 1);
-
-  // Search for the next matching time (max 2 years ahead)
-  const maxIterations = 365 * 24 * 60 * 2; // 2 years in minutes
-  
-  for (let i = 0; i < maxIterations; i++) {
-    const candidate = new Date(from.getTime() + i * 60000);
-    
-    const minute = candidate.getMinutes();
-    const hour = candidate.getHours();
-    const dayOfMonth = candidate.getDate();
-    const month = candidate.getMonth() + 1;
-    const dayOfWeek = candidate.getDay();
-
-    if (
-      parsed.minute.values.includes(minute) &&
-      parsed.hour.values.includes(hour) &&
-      parsed.month.values.includes(month) &&
-      (parsed.dayOfMonth.values.includes(dayOfMonth) ||
-        parsed.dayOfWeek.values.includes(dayOfWeek))
-    ) {
-      return candidate;
-    }
+): Date | null {
+  // null/undefined/빈 문자열 처리
+  if (!expression || expression.trim() === "") {
+    console.warn("[Cron] Empty cron expression provided");
+    return null;
   }
 
-  throw new Error(`Could not find next run time for: ${expression}`);
+  try {
+    const parsed = parseCronExpression(expression);
+    const from = new Date(fromDate);
+    
+    // Invalid date 체크
+    if (isNaN(from.getTime())) {
+      console.warn("[Cron] Invalid fromDate provided");
+      return null;
+    }
+    
+    // Start from the next minute
+    from.setSeconds(0);
+    from.setMilliseconds(0);
+    from.setMinutes(from.getMinutes() + 1);
+
+    // Search for the next matching time (max 2 years ahead)
+    const maxIterations = 365 * 24 * 60 * 2; // 2 years in minutes
+    
+    for (let i = 0; i < maxIterations; i++) {
+      const candidate = new Date(from.getTime() + i * 60000);
+      
+      const minute = candidate.getMinutes();
+      const hour = candidate.getHours();
+      const dayOfMonth = candidate.getDate();
+      const month = candidate.getMonth() + 1;
+      const dayOfWeek = candidate.getDay();
+
+      if (
+        parsed.minute.values.includes(minute) &&
+        parsed.hour.values.includes(hour) &&
+        parsed.month.values.includes(month) &&
+        (parsed.dayOfMonth.values.includes(dayOfMonth) ||
+          parsed.dayOfWeek.values.includes(dayOfWeek))
+      ) {
+        return candidate;
+      }
+    }
+
+    console.warn(`[Cron] Could not find next run time for: ${expression}`);
+    return null;
+  } catch (error) {
+    console.error(`[Cron] Error parsing expression "${expression}":`, error);
+    return null;
+  }
 }
 
 /**
  * Get the next run time for any schedule type
+ * Returns NaN if schedule is invalid (check with isNaN())
  */
-export function getNextRun(schedule: Schedule, now: Date = new Date()): number {
+export function getNextRun(schedule: Schedule | null | undefined, now: Date = new Date()): number {
+  // null/undefined 처리
+  if (!schedule) {
+    console.warn("[Cron] No schedule provided to getNextRun");
+    return NaN;
+  }
+
   switch (schedule.kind) {
     case "at":
-      return schedule.atMs;
+      return schedule.atMs ?? NaN;
 
     case "every": {
+      const everyMs = schedule.everyMs || schedule.intervalMs;
+      if (!everyMs || everyMs <= 0) {
+        console.warn("[Cron] Invalid everyMs in schedule");
+        return NaN;
+      }
       const startMs = schedule.startMs ?? now.getTime();
       const elapsed = now.getTime() - startMs;
-      const intervals = Math.floor(elapsed / schedule.everyMs);
-      return startMs + (intervals + 1) * schedule.everyMs;
+      const intervals = Math.floor(elapsed / everyMs);
+      return startMs + (intervals + 1) * everyMs;
     }
 
-    case "cron":
-      return getNextCronRun(schedule.expression, now, schedule.timezone).getTime();
+    case "cron": {
+      const nextRun = getNextCronRun(schedule.expression, now, schedule.timezone);
+      return nextRun ? nextRun.getTime() : NaN;
+    }
 
     default:
-      throw new Error(`Unknown schedule kind: ${(schedule as Schedule).kind}`);
+      console.warn(`[Cron] Unknown schedule kind: ${(schedule as Schedule).kind}`);
+      return NaN;
   }
 }
 

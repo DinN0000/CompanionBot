@@ -5,6 +5,7 @@ import { chat, type ModelId } from "../ai/claude.js";
 import { isCalendarConfigured, getTodayEvents, formatEvent } from "../calendar/index.js";
 import { getSecret } from "../config/secrets.js";
 import { checkForUpdates } from "../updates/index.js";
+import { INTERVAL_30_MINUTES, INTERVAL_24_HOURS, hoursToMs } from "../utils/time.js";
 
 type HeartbeatConfig = {
   chatId: number;
@@ -28,13 +29,13 @@ const timestampCache: Map<number, { lastCheckAt: number; lastMessageAt: number }
 // 업데이트 체크 캐시 (하루에 한 번만)
 let lastUpdateCheck = 0;
 let cachedUpdateInfo: { hasUpdate: boolean; current: string; latest: string } | null = null;
-const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24시간
+const UPDATE_CHECK_INTERVAL = INTERVAL_24_HOURS;
 
 // 봇 인스턴스
 let botInstance: { api: { sendMessage: (chatId: number, text: string) => Promise<unknown> } } | null = null;
 
 // 기본 간격: 30분
-const DEFAULT_INTERVAL_MS = 30 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = INTERVAL_30_MINUTES;
 
 export function setHeartbeatBot(bot: { api: { sendMessage: (chatId: number, text: string) => Promise<unknown> } }): void {
   botInstance = bot;
@@ -340,7 +341,7 @@ export async function runHeartbeatNow(chatId: number): Promise<boolean> {
       enabled: false,
       intervalMs: DEFAULT_INTERVAL_MS,
       lastCheckAt: Date.now(),
-      lastMessageAt: Date.now() - (8 * 60 * 60 * 1000), // 8시간 전으로 설정
+      lastMessageAt: Date.now() - hoursToMs(8), // 8시간 전으로 설정
     };
     return await executeHeartbeat(defaultConfig);
   }

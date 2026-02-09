@@ -6,6 +6,18 @@ import { promisify } from "util";
 import { randomUUID } from "crypto";
 import { MODELS, type ModelId } from "../ai/claude.js";
 import { getCurrentChatId, setModel, getModel } from "../session/state.js";
+import {
+  SESSION_MAX_OUTPUT_LINES,
+  SESSION_CLEANUP_INTERVAL_MS,
+  SESSION_TTL_MS,
+  COMMAND_TIMEOUT_SECONDS,
+  TOOL_RESULT_MAX_LENGTH,
+  WEB_FETCH_MAX_CHARS,
+  DEFAULT_SEARCH_RESULTS,
+  MAX_SEARCH_RESULTS,
+  DEFAULT_MEMORY_SEARCH_LIMIT,
+  DEFAULT_MEMORY_MIN_SCORE,
+} from "../utils/constants.js";
 // Note: getCurrentChatId uses AsyncLocalStorage - must be called within runWithChatId context
 import {
   getWorkspacePath,
@@ -79,13 +91,6 @@ interface ProcessSession {
 // 메모리에 세션 저장
 const sessions = new Map<string, ProcessSession>();
 
-// Output buffer 최대 크기 (라인 수)
-const MAX_OUTPUT_LINES = 1000;
-
-// 세션 정리 간격 및 TTL (메모리 누수 방지)
-const SESSION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10분마다 정리
-const SESSION_TTL_MS = 60 * 60 * 1000; // 완료된 세션 1시간 후 삭제
-
 // 완료된 세션 자동 정리 함수
 function cleanupStaleSessions(): void {
   const now = Date.now();
@@ -107,22 +112,29 @@ function appendOutput(session: ProcessSession, data: string) {
   const lines = data.split("\n");
   session.outputBuffer.push(...lines);
   // 버퍼 크기 제한
-  if (session.outputBuffer.length > MAX_OUTPUT_LINES) {
-    session.outputBuffer = session.outputBuffer.slice(-MAX_OUTPUT_LINES);
+  if (session.outputBuffer.length > SESSION_MAX_OUTPUT_LINES) {
+    session.outputBuffer = session.outputBuffer.slice(-SESSION_MAX_OUTPUT_LINES);
   }
 }
 
 // 홈 디렉토리
 const home = process.env.HOME || "";
 
-// 허용된 디렉토리 설정
+// 허용된 디렉토리 설정 (캐시됨 - 환경변수는 런타임 중 변경되지 않음)
 // - COMPANIONBOT_FULL_ACCESS=true: 홈 디렉토리 전체 접근 (위험한 파일 패턴은 여전히 차단)
 // - COMPANIONBOT_ALLOWED_PATHS: 콜론(:)으로 구분된 추가 경로 (예: /tmp:/var/data)
 // - 기본값: ~/Documents, ~/projects, 워크스페이스
+let _cachedAllowedPaths: string[] | null = null;
+
 function getAllowedPaths(): string[] {
+  if (_cachedAllowedPaths) {
+    return _cachedAllowedPaths;
+  }
+  
   // 전체 접근 모드
   if (process.env.COMPANIONBOT_FULL_ACCESS === "true") {
-    return [home];
+    _cachedAllowedPaths = [home];
+    return _cachedAllowedPaths;
   }
   
   // 기본 경로
@@ -143,7 +155,8 @@ function getAllowedPaths(): string[] {
     }
   }
   
-  return paths;
+  _cachedAllowedPaths = paths;
+  return _cachedAllowedPaths;
 }
 
 // 위험한 파일 패턴

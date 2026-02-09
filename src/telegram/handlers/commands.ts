@@ -588,8 +588,12 @@ export function registerCommands(bot: Bot): void {
                 await ctx.reply("❌ 인증 실패. 다시 시도해주세요.");
               }
             })
-            .catch(() => {
-              // 타임아웃 등
+            .catch(async (error) => {
+              const errorMsg = error instanceof Error ? error.message : String(error);
+              console.error(`[Calendar] Auth server error for chatId=${ctx.chat.id}:`, errorMsg);
+              if (errorMsg.includes("timeout") || errorMsg.includes("Timeout")) {
+                await ctx.reply("⏰ 인증 시간이 만료됐어요. /calendar_setup 으로 다시 시도해주세요.");
+              }
             });
         }
         return;
@@ -651,8 +655,12 @@ export function registerCommands(bot: Bot): void {
               await ctx.reply("❌ 인증 실패. 다시 시도해주세요.");
             }
           })
-          .catch(() => {
-            // 타임아웃
+          .catch(async (error) => {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            console.error("[Calendar] Auth server error:", errorMsg);
+            if (errorMsg.includes("timeout") || errorMsg.includes("Timeout")) {
+              await ctx.reply("⏰ 인증 시간이 만료됐어요. /calendar_setup 으로 다시 시도해주세요.");
+            }
           });
       }
       return;
@@ -685,8 +693,16 @@ export function registerCommands(bot: Bot): void {
 
       await ctx.reply(message);
     } catch (error) {
-      console.error("Calendar error:", error);
-      await ctx.reply("캘린더 조회 중 오류가 발생했어요.");
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[Calendar] chatId=${ctx.chat.id} getTodayEvents error:`, errorMsg);
+      
+      if (errorMsg.includes("invalid_grant") || errorMsg.includes("Token")) {
+        await ctx.reply("캘린더 인증이 만료됐어요. /calendar_setup 으로 다시 연동해주세요.");
+      } else if (errorMsg.includes("timeout") || errorMsg.includes("ETIMEDOUT")) {
+        await ctx.reply("Google 서버 응답이 느려요. 잠시 후 다시 시도해주세요.");
+      } else {
+        await ctx.reply("캘린더를 불러오지 못했어요. 잠시 후 다시 시도해주세요.");
+      }
     }
   });
 

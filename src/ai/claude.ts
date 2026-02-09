@@ -1,9 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { tools, executeTool } from "../tools/index.js";
-
-// 재시도 설정
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000;
+import { sleep } from "../utils/time.js";
+import { MAX_RETRIES, BASE_RETRY_DELAY_MS } from "../utils/constants.js";
 
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -14,27 +12,37 @@ async function withRetry<T>(
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       return await fn();
-    } catch (error: any) {
-      lastError = error;
-      
-      // Rate limit (429)
-      if (error.status === 429) {
-        const retryAfter = error.headers?.["retry-after"];
-        const delay = retryAfter 
-          ? parseInt(retryAfter) * 1000 
-          : BASE_DELAY_MS * Math.pow(2, attempt);
+    } catch (error: unknown) {
+      // APIError 타입 체크
+      if (error instanceof APIError) {
+        lastError = error;
         
-        console.log(`[RateLimit] 429 received, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
-        await sleep(delay);
-        continue;
+        // Rate limit (429)
+        if (error.status === 429) {
+          const retryAfter = error.headers?.["retry-after"];
+          const delay = retryAfter 
+            ? parseInt(retryAfter) * 1000 
+            : BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+          
+          console.log(`[RateLimit] 429 received, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
+          await sleep(delay);
+          continue;
+        }
+        
+        // 서버 에러 (500+)
+        if (error.status >= 500) {
+          const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+          console.log(`[ServerError] ${error.status}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
+          await sleep(delay);
+          continue;
+        }
       }
       
-      // 서버 에러 (500+)
-      if (error.status >= 500) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
-        console.log(`[ServerError] ${error.status}, waiting ${delay}ms (attempt ${attempt + 1}/${retries})`);
-        await sleep(delay);
-        continue;
+      // 일반 Error 처리
+      if (error instanceof Error) {
+        lastError = error;
+      } else {
+        lastError = new Error(String(error));
       }
       
       // 다른 에러는 바로 throw
@@ -43,10 +51,6 @@ async function withRetry<T>(
   }
   
   throw lastError;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 let anthropic: Anthropic | null = null;

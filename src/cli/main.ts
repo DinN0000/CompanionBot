@@ -69,7 +69,7 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
     let selectedValues: string[] = [];
     try {
       selectedValues = await checkbox({
-        message: "사용할 기능 선택 (Space=선택, Enter=확정)",
+        message: "추가 기능 선택 (Space=선택, Enter=확정, 바로 Enter=건너뛰기)",
         choices: [
           { 
             name: "🔍 웹 검색 - 최신 정보 검색 (Brave API, 무료 2000/월)", 
@@ -83,10 +83,6 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
             name: "🌤️  날씨 - 현재 날씨, 브리핑 (OpenWeatherMap, 무료)", 
             value: "weather" 
           },
-          { 
-            name: "⏭️  건너뛰기 (기본 기능만 사용)", 
-            value: "skip" 
-          },
         ],
       });
     } catch {
@@ -95,12 +91,9 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
       return false;
     }
 
-    // "건너뛰기" 선택했으면 다른 선택 무시
-    if (!selectedValues.includes("skip")) {
-      features.webSearch = selectedValues.includes("webSearch");
-      features.calendar = selectedValues.includes("calendar");
-      features.weather = selectedValues.includes("weather");
-    }
+    features.webSearch = selectedValues.includes("webSearch");
+    features.calendar = selectedValues.includes("calendar");
+    features.weather = selectedValues.includes("weather");
 
     // 선택 요약
     const selectedFeatures = [];

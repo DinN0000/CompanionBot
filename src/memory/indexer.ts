@@ -8,6 +8,7 @@ import * as path from "path";
 import { invalidateCache, loadAllMemoryChunks } from "./vectorStore.js";
 import { indexTextBatch, clearIndex as clearFtsIndex, getDocumentCount, type FtsEntry } from "./ftsIndex.js";
 import { getMemoryDirPath, getWorkspaceFilePath } from "../workspace/paths.js";
+import { MEMORY } from "../config/constants.js";
 
 /**
  * 텍스트를 청크로 분할합니다.
@@ -21,15 +22,15 @@ function splitIntoChunks(text: string, source: string): Array<{ id: string; text
 
   for (const section of sections) {
     const trimmed = section.trim();
-    if (!trimmed || trimmed.length < 20) continue;
+    if (!trimmed || trimmed.length < MEMORY.MIN_CHUNK_LENGTH) continue;
 
     // 청크가 너무 길면 추가로 분할
-    if (trimmed.length > 500) {
+    if (trimmed.length > MEMORY.MAX_CHUNK_LENGTH) {
       const lines = trimmed.split("\n");
       let currentChunk = "";
 
       for (const line of lines) {
-        if (currentChunk.length + line.length > 500) {
+        if (currentChunk.length + line.length > MEMORY.MAX_CHUNK_LENGTH) {
           if (currentChunk.trim()) {
             chunks.push({
               id: `${source}:${chunkIndex++}`,
@@ -98,7 +99,7 @@ export async function indexMainMemory(): Promise<number> {
 /**
  * 일일 메모리 파일들 인덱싱
  */
-export async function indexDailyMemories(days: number = 30): Promise<number> {
+export async function indexDailyMemories(days: number = MEMORY.RECENT_DAYS): Promise<number> {
   const memoryDir = getMemoryDirPath();
   let totalChunks = 0;
 

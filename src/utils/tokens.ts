@@ -8,6 +8,12 @@
  * These are rough estimates for context management, not exact counts.
  */
 
+import {
+  TOKENS_PER_KOREAN_CHAR,
+  CHARS_PER_TOKEN_OTHER,
+  MESSAGE_TOKEN_OVERHEAD,
+} from "./constants.js";
+
 export interface MessageLike {
   content: string | unknown;
   role?: string;
@@ -15,13 +21,13 @@ export interface MessageLike {
 
 /**
  * Estimate token count for a text string
- * 한글은 보수적으로 1.5 토큰/글자로 계산 (실제보다 약간 높게)
+ * 한글은 보수적으로 계산 (실제보다 약간 높게)
  */
 export function estimateTokens(text: string): number {
   // 자모음까지 포함하는 넓은 범위의 한글 매칭
   const koreanChars = (text.match(/[\u3131-\uD79D]/g) || []).length;
   const otherChars = text.length - koreanChars;
-  return Math.ceil(koreanChars * 1.5 + otherChars / 4);
+  return Math.ceil(koreanChars * TOKENS_PER_KOREAN_CHAR + otherChars / CHARS_PER_TOKEN_OTHER);
 }
 
 /**
@@ -32,6 +38,6 @@ export function estimateMessagesTokens(messages: MessageLike[]): number {
     const content = typeof msg.content === 'string' 
       ? msg.content 
       : JSON.stringify(msg.content);
-    return sum + estimateTokens(content) + 4; // 메시지 오버헤드
+    return sum + estimateTokens(content) + MESSAGE_TOKEN_OVERHEAD;
   }, 0);
 }

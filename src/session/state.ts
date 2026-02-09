@@ -1,21 +1,9 @@
 import { AsyncLocalStorage } from "async_hooks";
-import type { ModelId } from "../ai/claude.js";
+import type { ModelId, ThinkingLevel } from "../ai/claude.js";
 import type { Message } from "../ai/claude.js";
 import { estimateMessagesTokens, estimateTokens } from "../utils/tokens.js";
 import * as persistence from "./persistence.js";
-
-// 세션 설정
-const MAX_SESSIONS = 100;
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24시간
-
-// 토큰 한도 (개선됨)
-const MAX_HISTORY_TOKENS = 40000; // 히스토리 한도
-const SUMMARY_THRESHOLD_TOKENS = 25000; // 이 이상이면 요약 시작
-const MIN_RECENT_MESSAGES = 6; // 최소 유지할 최근 메시지
-const MAX_PINNED_TOKENS = 5000; // 핀 맥락 최대 토큰
-
-// 영구 저장 설정
-const MAX_HISTORY_LOAD = 50; // 메모리에 로드할 최대 메시지 수
+import { SESSION, TOKENS, MESSAGES } from "../config/constants.js";
 
 /**
  * 핀된 맥락 - 중요한 정보를 별도 보관
@@ -40,6 +28,7 @@ export type SummaryChunk = {
 type SessionData = {
   history: Message[];
   model: ModelId;
+  thinkingLevel: ThinkingLevel;
   lastAccessedAt: number;
   // 새 필드들
   pinnedContexts: PinnedContext[];
@@ -59,6 +48,7 @@ function getSession(chatId: number): SessionData {
     return {
       history: [],
       model: "sonnet",
+      thinkingLevel: "medium",
       lastAccessedAt: Date.now(),
       pinnedContexts: [],
       summaryChunks: [],
@@ -73,6 +63,7 @@ function getSession(chatId: number): SessionData {
     // 마이그레이션: 기존 세션에 새 필드 추가
     if (!existing.pinnedContexts) existing.pinnedContexts = [];
     if (!existing.summaryChunks) existing.summaryChunks = [];
+    if (!existing.thinkingLevel) existing.thinkingLevel = "medium";
     return existing;
   }
 
@@ -80,7 +71,7 @@ function getSession(chatId: number): SessionData {
   cleanupSessions();
 
   // 기존 JSONL 파일에서 히스토리 로드
-  const persistedMessages = persistence.loadHistorySync(chatId, MAX_HISTORY_LOAD);
+  const persistedMessages = persistence.loadHistorySync(chatId, SESSION.MAX_HISTORY_LOAD);
   const history: Message[] = persistedMessages.map(pm => ({
     role: pm.role,
     content: pm.content,
@@ -94,6 +85,7 @@ function getSession(chatId: number): SessionData {
   const session: SessionData = {
     history,
     model: "sonnet",
+    thinkingLevel: "medium",
     lastAccessedAt: now,
     pinnedContexts: [],
     summaryChunks: [],
@@ -108,17 +100,17 @@ function cleanupSessions(): void {
 
   // 1. TTL 만료된 세션 삭제
   for (const [chatId, session] of sessions) {
-    if (now - session.lastAccessedAt > SESSION_TTL_MS) {
+    if (now - session.lastAccessedAt > SESSION.TTL_MS) {
       sessions.delete(chatId);
     }
   }
 
   // 2. 최대 개수 초과 시 LRU 방식으로 삭제
-  if (sessions.size >= MAX_SESSIONS) {
+  if (sessions.size >= SESSION.MAX_SESSIONS) {
     const entries = Array.from(sessions.entries());
     entries.sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
 
-    const toRemove = entries.slice(0, sessions.size - MAX_SESSIONS + 1);
+    const toRemove = entries.slice(0, sessions.size - SESSION.MAX_SESSIONS + 1);
     for (const [chatId] of toRemove) {
       sessions.delete(chatId);
     }
@@ -180,11 +172,11 @@ export function pinContext(chatId: number, text: string, source: "auto" | "user"
   const newTokens = estimateTokens(text);
   
   // 토큰 한도 체크
-  if (currentTokens + newTokens > MAX_PINNED_TOKENS) {
+  if (currentTokens + newTokens > TOKENS.MAX_PINNED) {
     // 오래된 자동 핀부터 제거
     while (
       session.pinnedContexts.length > 0 &&
-      currentTokens + newTokens > MAX_PINNED_TOKENS
+      currentTokens + newTokens > TOKENS.MAX_PINNED
     ) {
       const autoIndex = session.pinnedContexts.findIndex((p) => p.source === "auto");
       if (autoIndex >= 0) {
@@ -232,8 +224,8 @@ export function addSummaryChunk(chatId: number, chunk: SummaryChunk): void {
   const session = getSession(chatId);
   session.summaryChunks.push(chunk);
   
-  // 오래된 요약은 병합 (최대 3개 유지)
-  while (session.summaryChunks.length > 3) {
+  // 오래된 요약은 병합
+  while (session.summaryChunks.length > MESSAGES.MAX_SUMMARY_CHUNKS) {
     const [first, second] = session.summaryChunks.splice(0, 2);
     session.summaryChunks.unshift({
       summary: `${first.summary}\n\n${second.summary}`,
@@ -260,14 +252,14 @@ export function trimHistoryByTokens(history: Message[] | null | undefined): void
   const currentTokens = estimateMessagesTokens(history);
   
   // 한도 이내면 패스
-  if (currentTokens <= MAX_HISTORY_TOKENS) {
+  if (currentTokens <= TOKENS.MAX_HISTORY) {
     return;
   }
 
   console.log(`[Trim] Starting trim: ${currentTokens} tokens, ${history.length} messages`);
 
   // 최근 메시지는 반드시 유지
-  while (estimateMessagesTokens(history) > MAX_HISTORY_TOKENS && history.length > MIN_RECENT_MESSAGES) {
+  while (estimateMessagesTokens(history) > TOKENS.MAX_HISTORY && history.length > MESSAGES.MIN_RECENT) {
     history.shift();
   }
 
@@ -296,7 +288,7 @@ export async function smartTrimHistory(
   const currentTokens = estimateMessagesTokens(history);
 
   // 요약 임계치 이하면 패스
-  if (currentTokens <= SUMMARY_THRESHOLD_TOKENS) {
+  if (currentTokens <= TOKENS.SUMMARY_THRESHOLD) {
     return false;
   }
 
@@ -308,9 +300,9 @@ export async function smartTrimHistory(
 
   console.log(`[SmartTrim] chatId=${chatId} tokens=${currentTokens}, starting summarization...`);
 
-  // 오래된 메시지들 (최근 6개 제외)
-  const toSummarize = history.slice(0, -MIN_RECENT_MESSAGES);
-  const toKeep = history.slice(-MIN_RECENT_MESSAGES);
+  // 오래된 메시지들 (최근 N개 제외)
+  const toSummarize = history.slice(0, -MESSAGES.MIN_RECENT);
+  const toKeep = history.slice(-MESSAGES.MIN_RECENT);
 
   if (toSummarize.length < 4) {
     // 요약할 게 별로 없으면 기본 트리밍
@@ -429,6 +421,14 @@ export function getModel(chatId: number): ModelId {
 
 export function setModel(chatId: number, modelId: ModelId): void {
   getSession(chatId).model = modelId;
+}
+
+export function getThinkingLevel(chatId: number): ThinkingLevel {
+  return getSession(chatId).thinkingLevel;
+}
+
+export function setThinkingLevel(chatId: number, level: ThinkingLevel): void {
+  getSession(chatId).thinkingLevel = level;
 }
 
 export function runWithChatId<T>(chatId: number, fn: () => T): T {

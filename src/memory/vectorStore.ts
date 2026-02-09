@@ -8,6 +8,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { getMemoryDirPath, getWorkspaceFilePath } from "../workspace/paths.js";
 import { embed, embedBatch, cosineSimilarity } from "./embeddings.js";
+import { MEMORY } from "../config/constants.js";
 
 export interface MemoryChunk {
   text: string;
@@ -25,7 +26,6 @@ export interface SearchResult {
 // 캐시된 청크들 (임베딩 포함)
 let cachedChunks: MemoryChunk[] = [];
 let cacheTimestamp = 0;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5분
 
 // 임베딩 영속 캐시 (hash → embedding)
 let embeddingCache: Map<string, number[]> = new Map();
@@ -97,15 +97,15 @@ function splitIntoChunks(text: string, source: string): MemoryChunk[] {
   
   for (const section of sections) {
     const trimmed = section.trim();
-    if (!trimmed || trimmed.length < 20) continue;
+    if (!trimmed || trimmed.length < MEMORY.MIN_CHUNK_LENGTH) continue;
     
     // 청크가 너무 길면 추가로 분할
-    if (trimmed.length > 500) {
+    if (trimmed.length > MEMORY.MAX_CHUNK_LENGTH) {
       const lines = trimmed.split("\n");
       let currentChunk = "";
       
       for (const line of lines) {
-        if (currentChunk.length + line.length > 500) {
+        if (currentChunk.length + line.length > MEMORY.MAX_CHUNK_LENGTH) {
           if (currentChunk.trim()) {
             chunks.push({ 
               text: currentChunk.trim(), 
@@ -147,11 +147,11 @@ async function doLoadAllMemoryChunks(): Promise<MemoryChunk[]> {
   
   const chunks: MemoryChunk[] = [];
 
-  // 1. 일별 메모리 파일 (최근 30일)
+  // 1. 일별 메모리 파일
   const memoryDir = getMemoryDirPath();
   try {
     const files = await fs.readdir(memoryDir);
-    const mdFiles = files.filter(f => f.endsWith(".md") && !f.startsWith(".")).sort().reverse().slice(0, 30);
+    const mdFiles = files.filter(f => f.endsWith(".md") && !f.startsWith(".")).sort().reverse().slice(0, MEMORY.RECENT_DAYS);
     
     for (const file of mdFiles) {
       try {
@@ -197,7 +197,7 @@ export async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
   const now = Date.now();
   
   // 캐시가 유효하면 반환
-  if (cachedChunks.length > 0 && now - cacheTimestamp < CACHE_TTL_MS) {
+  if (cachedChunks.length > 0 && now - cacheTimestamp < MEMORY.CACHE_TTL_MS) {
     return cachedChunks;
   }
 
@@ -213,7 +213,7 @@ export async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
     // 캐시 업데이트 (임베딩은 아직 없음)
     // 빈 결과도 캐시하되 TTL을 짧게 (1분)
     cachedChunks = chunks;
-    cacheTimestamp = chunks.length > 0 ? Date.now() : Date.now() - CACHE_TTL_MS + 60000;
+    cacheTimestamp = chunks.length > 0 ? Date.now() : Date.now() - MEMORY.CACHE_TTL_MS + 60000;
     return chunks;
   } catch (error) {
     // 로드 실패 시 캐시하지 않음
@@ -232,8 +232,8 @@ export async function loadAllMemoryChunks(): Promise<MemoryChunk[]> {
  */
 export async function search(
   queryEmbedding: number[],
-  topK: number = 5,
-  minScore: number = 0.3
+  topK: number = MEMORY.SEARCH_TOP_K,
+  minScore: number = MEMORY.MIN_SIMILARITY
 ): Promise<SearchResult[]> {
   const chunks = await loadAllMemoryChunks();
   

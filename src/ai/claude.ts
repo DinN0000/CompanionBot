@@ -1,7 +1,14 @@
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { tools, executeTool } from "../tools/index.js";
 import { sleep } from "../utils/time.js";
-import { MAX_RETRIES, BASE_RETRY_DELAY_MS } from "../utils/constants.js";
+import { 
+  MAX_RETRIES, 
+  BASE_RETRY_DELAY_MS, 
+  MAX_TOOL_ITERATIONS,
+  TOOL_RESULT_MAX_LENGTH,
+  TOOL_INPUT_SUMMARY_LENGTH,
+  TOOL_OUTPUT_SUMMARY_LENGTH,
+} from "../utils/constants.js";
 
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -77,32 +84,92 @@ export type ModelId = "sonnet" | "opus" | "haiku";
 export type ModelConfig = {
   id: string;
   name: string;
-  maxTokens: number;
-  thinkingBudget: number; // 0 = thinking 비활성화
+  contextWindow: number;  // 모델 전체 컨텍스트 윈도우
+  supportsThinking: boolean;
 };
 
-// 모델별 max_tokens 및 thinking budget 설정
-// 참고: Claude API에서 thinking + output이 모델 한도 초과하면 안 됨
+// Thinking 레벨: off/low/medium/high
+export type ThinkingLevel = "off" | "low" | "medium" | "high";
+
+// Thinking 레벨별 설정 (비율 및 최대값)
+export const THINKING_CONFIGS: Record<ThinkingLevel, { ratio: number; maxBudget: number }> = {
+  off: { ratio: 0, maxBudget: 0 },
+  low: { ratio: 0.3, maxBudget: 5000 },
+  medium: { ratio: 0.5, maxBudget: 10000 },
+  high: { ratio: 0.7, maxBudget: 20000 },
+};
+
+// 모델별 설정
 export const MODELS: Record<ModelId, ModelConfig> = {
   haiku: {
     id: "claude-haiku-3-5-20241022",
     name: "Claude Haiku 3.5",
-    maxTokens: 4096,        // 빠른 응답
-    thinkingBudget: 0,      // Haiku는 thinking 미지원
+    contextWindow: 200000,
+    supportsThinking: false,  // Haiku는 thinking 미지원
   },
   sonnet: {
     id: "claude-sonnet-4-20250514",
     name: "Claude Sonnet 4",
-    maxTokens: 16000,       // 일반 작업 (must be > thinkingBudget)
-    thinkingBudget: 10000,  // 적당한 thinking
+    contextWindow: 200000,
+    supportsThinking: true,
   },
   opus: {
     id: "claude-opus-4-20250514",
     name: "Claude Opus 4",
-    maxTokens: 64000,       // 복잡한 작업 (must be > thinkingBudget)
-    thinkingBudget: 32000,  // 깊은 thinking
+    contextWindow: 200000,
+    supportsThinking: true,
   },
 };
+
+// 동적 토큰 계산을 위한 설정
+const MIN_OUTPUT_TOKENS = 4096;  // 최소 출력 토큰
+const OUTPUT_BUFFER_RATIO = 0.3;  // 컨텍스트의 30%를 출력용으로 예약
+
+/**
+ * 동적으로 max_tokens와 thinking budget 계산
+ * 
+ * @param modelId 모델 ID
+ * @param thinkingLevel thinking 레벨
+ * @param inputTokens 현재 입력 토큰 수 (시스템 프롬프트 + 히스토리)
+ * @returns { maxTokens, thinkingBudget }
+ */
+export function calculateTokenBudgets(
+  modelId: ModelId,
+  thinkingLevel: ThinkingLevel,
+  inputTokens: number
+): { maxTokens: number; thinkingBudget: number } {
+  const model = MODELS[modelId];
+  const thinkingConfig = THINKING_CONFIGS[thinkingLevel];
+
+  // Thinking 미지원 모델이거나 off인 경우
+  if (!model.supportsThinking || thinkingLevel === "off") {
+    // 간단히 고정 max_tokens 사용
+    return { maxTokens: 8192, thinkingBudget: 0 };
+  }
+
+  // 사용 가능한 출력 토큰 계산
+  // 컨텍스트 윈도우 - 입력 토큰 = 출력 가능 토큰
+  const availableOutputTokens = model.contextWindow - inputTokens;
+  
+  // 최소 출력 토큰 보장
+  const maxTokens = Math.max(MIN_OUTPUT_TOKENS, Math.floor(availableOutputTokens * OUTPUT_BUFFER_RATIO));
+
+  // thinking budget 계산: min(레벨별 최대값, max_tokens * 비율)
+  // API 조건: max_tokens > budget_tokens 이므로 max_tokens - 1024 로 상한 설정
+  const calculatedBudget = Math.floor(maxTokens * thinkingConfig.ratio);
+  const thinkingBudget = Math.min(
+    thinkingConfig.maxBudget,
+    calculatedBudget,
+    maxTokens - 1024  // max_tokens > budget_tokens 조건 충족
+  );
+
+  // budget이 1024 미만이면 thinking 비활성화 (의미 없음)
+  if (thinkingBudget < 1024) {
+    return { maxTokens, thinkingBudget: 0 };
+  }
+
+  return { maxTokens, thinkingBudget };
+}
 
 export type ToolUseSummary = {
   name: string;
@@ -118,7 +185,8 @@ export type ChatResult = {
 export async function chat(
   messages: Message[],
   systemPrompt?: string,
-  modelId: ModelId = "sonnet"
+  modelId: ModelId = "sonnet",
+  thinkingLevel: ThinkingLevel = "medium"
 ): Promise<ChatResult> {
   const client = getClient();
   const modelConfig = MODELS[modelId];
@@ -130,11 +198,34 @@ export async function chat(
     content: m.content,
   }));
 
+  // 입력 토큰 추정 (대략적)
+  const estimateInputTokens = (): number => {
+    let total = 0;
+    // 시스템 프롬프트
+    if (systemPrompt) {
+      total += Math.ceil(systemPrompt.length / 3); // 대략 3자당 1토큰
+    }
+    // 메시지들
+    for (const msg of apiMessages) {
+      const content = typeof msg.content === "string" 
+        ? msg.content 
+        : JSON.stringify(msg.content);
+      total += Math.ceil(content.length / 3);
+    }
+    return total;
+  };
+
+  // 동적 토큰 budget 계산
+  const inputTokens = estimateInputTokens();
+  const { maxTokens, thinkingBudget } = calculateTokenBudgets(modelId, thinkingLevel, inputTokens);
+  
+  console.log(`[Chat] model=${modelId}, thinking=${thinkingLevel}, input~${inputTokens}, maxTokens=${maxTokens}, budget=${thinkingBudget}`);
+
   // API 요청 파라미터 빌드 (도구 루프에서도 동일하게 사용)
   const buildRequestParams = (): Anthropic.MessageCreateParamsNonStreaming => {
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: modelConfig.id,
-      max_tokens: modelConfig.maxTokens,
+      max_tokens: maxTokens,
       messages: apiMessages,
       tools: tools,
     };
@@ -144,10 +235,10 @@ export async function chat(
     }
 
     // thinking 활성화 (budget > 0인 경우)
-    if (modelConfig.thinkingBudget > 0) {
+    if (thinkingBudget > 0) {
       params.thinking = {
         type: "enabled",
-        budget_tokens: modelConfig.thinkingBudget,
+        budget_tokens: thinkingBudget,
       };
     }
 
@@ -157,8 +248,7 @@ export async function chat(
   let response: Anthropic.Message;
   response = await withRetry(() => client.messages.create(buildRequestParams()));
 
-  // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복 (최대 10회)
-  const MAX_TOOL_ITERATIONS = 10;
+  // Tool use 루프 - Claude가 도구 사용을 멈출 때까지 반복
   let iterations = 0;
 
   while (response.stop_reason === "tool_use" && iterations < MAX_TOOL_ITERATIONS) {
@@ -180,8 +270,8 @@ export async function chat(
 
       // 결과가 너무 길면 자르기
       const truncatedResult =
-        result.length > 10000
-          ? result.slice(0, 10000) + "\n... (truncated)"
+        result.length > TOOL_RESULT_MAX_LENGTH
+          ? result.slice(0, TOOL_RESULT_MAX_LENGTH) + "\n... (truncated)"
           : result;
 
       toolResults.push({
@@ -193,8 +283,8 @@ export async function chat(
       // 도구 사용 기록 (히스토리 참조용)
       toolsUsed.push({
         name: toolUse.name,
-        input: JSON.stringify(toolUse.input).slice(0, 200),
-        output: truncatedResult.slice(0, 500),
+        input: JSON.stringify(toolUse.input).slice(0, TOOL_INPUT_SUMMARY_LENGTH),
+        output: truncatedResult.slice(0, TOOL_OUTPUT_SUMMARY_LENGTH),
       });
     }
 
@@ -251,11 +341,12 @@ export async function chatSmart(
   messages: Message[],
   systemPrompt: string,
   modelId: ModelId,
+  thinkingLevel: ThinkingLevel = "medium",
   onChunk?: (text: string, accumulated: string) => void | Promise<void>
 ): Promise<ChatSmartResult> {
   // 스트리밍 콜백이 없으면 그냥 일반 chat 사용
   if (!onChunk) {
-    const result = await chat(messages, systemPrompt, modelId);
+    const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
     return { text: result.text, usedTools: result.toolsUsed.length > 0, toolsUsed: result.toolsUsed };
   }
 
@@ -268,10 +359,27 @@ export async function chatSmart(
     content: m.content,
   }));
 
+  // 입력 토큰 추정
+  let inputTokens = 0;
+  if (systemPrompt) {
+    inputTokens += Math.ceil(systemPrompt.length / 3);
+  }
+  for (const msg of apiMessages) {
+    const content = typeof msg.content === "string" 
+      ? msg.content 
+      : JSON.stringify(msg.content);
+    inputTokens += Math.ceil(content.length / 3);
+  }
+
+  // 동적 토큰 budget 계산
+  const { maxTokens, thinkingBudget } = calculateTokenBudgets(modelId, thinkingLevel, inputTokens);
+  
+  console.log(`[ChatSmart] model=${modelId}, thinking=${thinkingLevel}, input~${inputTokens}, maxTokens=${maxTokens}, budget=${thinkingBudget}`);
+
   // 스트리밍 요청 파라미터
   const params: Anthropic.MessageCreateParamsStreaming = {
     model: modelConfig.id,
-    max_tokens: modelConfig.maxTokens,
+    max_tokens: maxTokens,
     messages: apiMessages,
     tools: tools,
     stream: true,
@@ -281,8 +389,13 @@ export async function chatSmart(
     params.system = systemPrompt;
   }
 
-  // Thinking은 스트리밍에서 복잡해지므로 일단 비활성화
-  // (도구 호출 폴백 시 chat()에서 thinking 사용됨)
+  // Thinking 활성화 (스트리밍에서도 지원)
+  if (thinkingBudget > 0) {
+    params.thinking = {
+      type: "enabled",
+      budget_tokens: thinkingBudget,
+    };
+  }
 
   let accumulated = "";
   let streamingStarted = false;
@@ -310,7 +423,7 @@ export async function chatSmart(
     // 주의: chat()은 내부에서 withRetry를 사용하므로 여기서 추가 재시도 불필요
     if (stopReason === "tool_use") {
       console.log("[Stream] Tool use detected, falling back to chat()");
-      const result = await chat(messages, systemPrompt, modelId);
+      const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
       return { text: result.text, usedTools: true, toolsUsed: result.toolsUsed };
     }
 
@@ -324,7 +437,7 @@ export async function chatSmart(
         console.log(`[Stream] Pre-stream error (${error.status}), retrying with withRetry...`);
         return await withRetry(async () => {
           // 재시도 시 일반 chat 사용 (스트리밍 대신)
-          const result = await chat(messages, systemPrompt, modelId);
+          const result = await chat(messages, systemPrompt, modelId, thinkingLevel);
           return { text: result.text, usedTools: false, toolsUsed: result.toolsUsed };
         });
       }

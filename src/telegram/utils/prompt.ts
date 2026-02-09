@@ -5,6 +5,12 @@ import { getWorkspace } from "./cache.js";
 import { embed } from "../../memory/embeddings.js";
 import { search } from "../../memory/vectorStore.js";
 import { buildContextForPrompt, getCurrentChatId } from "../../session/state.js";
+import {
+  SEARCH_CONTEXT_LENGTH,
+  PROMPT_MEMORY_SEARCH_LIMIT,
+  PROMPT_MEMORY_MIN_SCORE,
+  MEMORY_PREVIEW_LENGTH,
+} from "../../utils/constants.js";
 import * as os from "os";
 
 // ============== Runtime 정보 ==============
@@ -90,7 +96,7 @@ function extractSearchContext(history: Message[]): string {
     .filter((m) => m.role === "user")
     .map((m) => (typeof m.content === "string" ? m.content : ""))
     .join(" ")
-    .slice(0, 500);
+    .slice(0, SEARCH_CONTEXT_LENGTH);
 }
 
 async function getRelevantMemories(history: Message[]): Promise<string> {
@@ -99,12 +105,12 @@ async function getRelevantMemories(history: Message[]): Promise<string> {
     if (!context.trim()) return "";
 
     const queryEmbedding = await embed(context);
-    const results = await search(queryEmbedding, 3, 0.4);
+    const results = await search(queryEmbedding, PROMPT_MEMORY_SEARCH_LIMIT, PROMPT_MEMORY_MIN_SCORE);
 
     if (results.length === 0) return "";
 
     return results
-      .map((r) => `- (${r.source}): ${r.text.slice(0, 200)}${r.text.length > 200 ? "..." : ""}`)
+      .map((r) => `- (${r.source}): ${r.text.slice(0, MEMORY_PREVIEW_LENGTH)}${r.text.length > MEMORY_PREVIEW_LENGTH ? "..." : ""}`)
       .join("\n");
   } catch {
     return "";

@@ -1,9 +1,10 @@
 import type { Bot, Context } from "grammy";
-import { chat, chatSmart, type Message, type ModelId } from "../../ai/claude.js";
+import { chat, chatSmart, type Message, type ModelId, type ThinkingLevel } from "../../ai/claude.js";
 import { recordActivity, recordError } from "../../health/index.js";
 import {
   getHistory,
   getModel,
+  getThinkingLevel,
   runWithChatId,
   trimHistoryByTokens,
   smartTrimHistory,
@@ -20,9 +21,7 @@ import {
   buildSystemPrompt,
 } from "../utils/index.js";
 import { estimateMessagesTokens } from "../../utils/tokens.js";
-
-const MAX_CONTEXT_TOKENS = 100000; // Claude 컨텍스트
-const COMPACTION_THRESHOLD = 0.35; // 35% (35,000 토큰) - MAX_HISTORY_TOKENS(50k)보다 먼저 트리거되도록
+import { TOKENS, TELEGRAM } from "../../config/constants.js";
 
 /**
  * 토큰 사용량이 임계치를 넘으면 자동으로 히스토리 압축
@@ -34,9 +33,9 @@ async function autoCompactIfNeeded(
 ): Promise<void> {
   try {
     const tokens = estimateMessagesTokens(history);
-    const usage = tokens / MAX_CONTEXT_TOKENS;
+    const usage = tokens / TOKENS.MAX_CONTEXT;
 
-    if (usage > COMPACTION_THRESHOLD && history.length > 6) {
+    if (usage > TOKENS.COMPACTION_THRESHOLD && history.length > 6) {
       // 자동 compaction 실행
       console.log(`[AutoCompact] chatId=${ctx.chat?.id} usage=${(usage * 100).toFixed(1)}% - compacting...`);
 
@@ -72,7 +71,8 @@ async function sendStreamingResponse(
   ctx: Context,
   messages: Message[],
   systemPrompt: string,
-  modelId: ModelId
+  modelId: ModelId,
+  thinkingLevel: ThinkingLevel
 ): Promise<string> {
   // 1. 먼저 "..." 플레이스홀더 메시지 전송
   const placeholder = await ctx.reply("...");
@@ -80,7 +80,7 @@ async function sendStreamingResponse(
   const messageId = placeholder.message_id;
 
   let lastUpdate = Date.now();
-  const UPDATE_INTERVAL = 500; // 0.5초마다 업데이트 (Telegram rate limit 고려)
+  const UPDATE_INTERVAL = TELEGRAM.STREAM_UPDATE_INTERVAL_MS;
   let lastText = "";
 
   try {
@@ -88,6 +88,7 @@ async function sendStreamingResponse(
       messages,
       systemPrompt,
       modelId,
+      thinkingLevel,
       async (_chunk: string, accumulated: string) => {
         const now = Date.now();
         // 0.5초마다 또는 충분히 변경되었을 때 업데이트
@@ -147,6 +148,7 @@ export function registerMessageHandlers(bot: Bot): void {
       recordActivity();
       const history = getHistory(chatId);
       const modelId = getModel(chatId);
+      const thinkingLevel = getThinkingLevel(chatId);
 
       await ctx.replyWithChatAction("typing");
 
@@ -160,10 +162,10 @@ export function registerMessageHandlers(bot: Bot): void {
           return;
         }
 
-        // 파일 크기 제한 (10MB)
-        const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
-        if (file.file_size && file.file_size > MAX_IMAGE_SIZE) {
-          await ctx.reply("사진이 너무 커. 10MB 이하로 보내줄래?");
+        // 파일 크기 제한
+        if (file.file_size && file.file_size > TELEGRAM.MAX_IMAGE_SIZE) {
+          const maxMb = Math.floor(TELEGRAM.MAX_IMAGE_SIZE / (1024 * 1024));
+          await ctx.reply(`사진이 너무 커. ${maxMb}MB 이하로 보내줄래?`);
           return;
         }
 
@@ -199,7 +201,7 @@ export function registerMessageHandlers(bot: Bot): void {
 
         try {
           const systemPrompt = await buildSystemPrompt(modelId, history);
-          const result = await chat(history, systemPrompt, modelId);
+          const result = await chat(history, systemPrompt, modelId, thinkingLevel);
 
           // 도구 사용 정보를 포함한 응답 기록
           let assistantContent = result.text;
@@ -274,6 +276,7 @@ export function registerMessageHandlers(bot: Bot): void {
 
       const history = getHistory(chatId);
       const modelId = getModel(chatId);
+      const thinkingLevel = getThinkingLevel(chatId);
 
       // 중요 맥락 자동 감지 및 핀
       const importantContext = detectImportantContext(userMessage);
@@ -290,7 +293,7 @@ export function registerMessageHandlers(bot: Bot): void {
       let urlContextForApi = ""; // 현재 요청에만 주입될 URL 내용
 
       if (urls.length > 0) {
-        const urlsToFetch = urls.slice(0, 3); // 최대 3개 URL
+        const urlsToFetch = urls.slice(0, TELEGRAM.MAX_URL_FETCH);
         const contents = await Promise.all(
           urlsToFetch.map((url) => fetchWebContent(url))
         );
@@ -337,7 +340,8 @@ export function registerMessageHandlers(bot: Bot): void {
           ctx,
           messagesForApi, // URL 내용이 포함된 버전
           systemPrompt,
-          modelId
+          modelId,
+          thinkingLevel
         );
 
         // 메모리 + JSONL에 영구 저장

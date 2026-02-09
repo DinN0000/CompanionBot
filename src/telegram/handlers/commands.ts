@@ -1,8 +1,9 @@
 import { Bot } from "grammy";
 import { randomBytes } from "crypto";
 import { getHealthStatus, formatUptime } from "../../health/index.js";
-import { chat, MODELS, type ModelId, type Message } from "../../ai/claude.js";
+import { chat, MODELS, THINKING_CONFIGS, type ModelId, type ThinkingLevel, type Message } from "../../ai/claude.js";
 import { estimateMessagesTokens } from "../../utils/tokens.js";
+import { TOKENS, MESSAGES, MEMORY, SECURITY, TELEGRAM } from "../../config/constants.js";
 
 // 대화 요약 생성 함수
 async function generateSummary(messages: Message[]): Promise<string> {
@@ -37,7 +38,7 @@ const resetTokens = new Map<number, { token: string; expiresAt: number }>();
 
 function generateResetToken(chatId: number): string {
   const token = randomBytes(8).toString("hex");
-  const expiresAt = Date.now() + 60000; // 1분 후 만료
+  const expiresAt = Date.now() + SECURITY.RESET_TOKEN_TTL_MS;
   resetTokens.set(chatId, { token, expiresAt });
   return token;
 }
@@ -58,6 +59,8 @@ import {
   clearHistory,
   getModel,
   setModel,
+  getThinkingLevel,
+  setThinkingLevel,
   runWithChatId,
   getPinnedContexts,
   pinContext,
@@ -217,9 +220,9 @@ export function registerCommands(bot: Bot): void {
     // 현재 토큰 수 계산
     const currentTokens = estimateMessagesTokens(history);
     
-    // 메시지 개수가 적고 토큰도 적으면 스킵 (5000 토큰 = 약 한글 3000자)
+    // 메시지 개수가 적고 토큰도 적으면 스킵
     // 단, 토큰이 많으면 메시지 개수와 관계없이 compact 허용
-    if (history.length <= 4 && currentTokens < 5000) {
+    if (history.length <= MESSAGES.KEEP_ON_COMPACT && currentTokens < TOKENS.COMPACT_MIN_TOKENS) {
       await ctx.reply(`현재 ${history.length}개 메시지, ~${currentTokens} 토큰이라 충분히 짧아!`);
       return;
     }
@@ -228,17 +231,17 @@ export function registerCommands(bot: Bot): void {
     await ctx.reply(`📊 현재: ${history.length}개 메시지, ~${currentTokens} 토큰\n요약 생성 중...`);
 
     // 요약할 메시지와 유지할 최근 메시지 분리
-    // 메시지가 4개 이하면 (토큰이 많아서 여기 온 경우) 전체 요약 후 마지막만 유지
+    // 메시지가 적으면 (토큰이 많아서 여기 온 경우) 전체 요약 후 마지막만 유지
     let recentMessages: Message[];
     let oldMessages: Message[];
     
-    if (history.length <= 4) {
+    if (history.length <= MESSAGES.KEEP_ON_COMPACT) {
       // 토큰이 많아서 compact 진입한 경우: 전체 요약 → 마지막 1개만 유지
       recentMessages = history.slice(-1);
       oldMessages = history.slice(0, -1);
     } else {
-      // 일반 경우: 마지막 4개 유지
-      recentMessages = history.slice(-4);
+      // 일반 경우: 마지막 N개 유지
+      recentMessages = history.slice(-MESSAGES.KEEP_ON_COMPACT);
       oldMessages = history.slice(0, -4);
     }
 
@@ -266,7 +269,7 @@ export function registerCommands(bot: Bot): void {
 
   // /memory 명령어 - 최근 기억 보기
   bot.command("memory", async (ctx) => {
-    const memories = await loadRecentMemories(7);
+    const memories = await loadRecentMemories(MEMORY.DISPLAY_DAYS);
 
     if (!memories.trim()) {
       await ctx.reply("아직 기억해둔 게 없어!");
@@ -274,11 +277,11 @@ export function registerCommands(bot: Bot): void {
     }
 
     // 너무 길면 자르기
-    const truncated = memories.length > 2000
-      ? memories.slice(0, 2000) + "\n\n... (더 있음)"
+    const truncated = memories.length > MEMORY.MAX_DISPLAY_LENGTH
+      ? memories.slice(0, MEMORY.MAX_DISPLAY_LENGTH) + "\n\n... (더 있음)"
       : memories;
 
-    await ctx.reply(`📝 최근 일주일 기억:\n\n${truncated}`);
+    await ctx.reply(`📝 최근 ${MEMORY.DISPLAY_DAYS}일 기억:\n\n${truncated}`);
   });
 
   // /model 명령어 - 모델 변경
@@ -308,6 +311,59 @@ export function registerCommands(bot: Bot): void {
       await ctx.reply(
         `Unknown model: ${arg}\n\n` +
         `Available: sonnet, opus, haiku`
+      );
+    }
+  });
+
+  // /thinking 명령어 - thinking 레벨 변경
+  bot.command("thinking", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const arg = ctx.message?.text?.split(" ")[1]?.toLowerCase();
+    const currentLevel = getThinkingLevel(chatId);
+    const currentModel = getModel(chatId);
+    const modelSupportsThinking = MODELS[currentModel].supportsThinking;
+
+    if (!arg) {
+      const levelList = Object.entries(THINKING_CONFIGS)
+        .map(([level, config]) => {
+          const marker = level === currentLevel ? "→" : "  ";
+          const desc = level === "off" 
+            ? "비활성화" 
+            : `최대 ${config.maxBudget} 토큰 (${Math.round(config.ratio * 100)}%)`;
+          return `${marker} /thinking ${level} - ${desc}`;
+        })
+        .join("\n");
+
+      const warning = !modelSupportsThinking 
+        ? `\n\n⚠️ 현재 모델(${MODELS[currentModel].name})은 thinking을 지원하지 않습니다.`
+        : "";
+
+      await ctx.reply(
+        `🧠 Thinking 레벨: ${currentLevel}${warning}\n\n` +
+        `사용 가능한 레벨:\n${levelList}\n\n` +
+        `Thinking이 높을수록 복잡한 문제를 더 잘 해결하지만 응답이 느려집니다.`
+      );
+      return;
+    }
+
+    if (arg in THINKING_CONFIGS) {
+      const level = arg as ThinkingLevel;
+      setThinkingLevel(chatId, level);
+      
+      const config = THINKING_CONFIGS[level];
+      const desc = level === "off"
+        ? "Thinking이 비활성화되었습니다."
+        : `최대 ${config.maxBudget} 토큰 (출력의 ${Math.round(config.ratio * 100)}%)`;
+      
+      const warning = !modelSupportsThinking && level !== "off"
+        ? `\n\n⚠️ 현재 모델(${MODELS[currentModel].name})은 thinking을 지원하지 않습니다. 모델을 변경해주세요.`
+        : "";
+
+      await ctx.reply(`🧠 Thinking 레벨: ${level}\n${desc}${warning}`);
+    } else {
+      await ctx.reply(
+        `Unknown level: ${arg}\n\n` +
+        `Available: off, low, medium, high`
       );
     }
   });
@@ -580,7 +636,7 @@ export function registerCommands(bot: Bot): void {
         try {
           const events = await getTodayEvents();
           const preview = events.length > 0
-            ? events.slice(0, 3).map(formatEvent).join("\n")
+            ? events.slice(0, TELEGRAM.CALENDAR_PREVIEW_COUNT).map(formatEvent).join("\n")
             : "오늘 일정 없음";
 
           await ctx.reply(

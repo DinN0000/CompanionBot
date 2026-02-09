@@ -10,6 +10,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as readline from "readline";
+import { MESSAGES } from "../config/constants.js";
 
 // 저장 경로
 const SESSIONS_DIR = path.join(os.homedir(), ".companionbot", "sessions");
@@ -67,7 +68,7 @@ export function appendMessage(chatId: number, role: "user" | "assistant", conten
  * @param limit 최근 N개만 로드 (메모리 절약, 0 = 전부)
  * @returns 로드된 메시지 배열
  */
-export async function loadHistory(chatId: number, limit: number = 100): Promise<PersistedMessage[]> {
+export async function loadHistory(chatId: number, limit: number = MESSAGES.HISTORY_LOAD_LIMIT): Promise<PersistedMessage[]> {
   const filePath = getSessionFilePath(chatId);
   
   if (!fs.existsSync(filePath)) {
@@ -109,7 +110,7 @@ export async function loadHistory(chatId: number, limit: number = 100): Promise<
 /**
  * 동기 버전 히스토리 로드 (초기화 시 사용)
  */
-export function loadHistorySync(chatId: number, limit: number = 100): PersistedMessage[] {
+export function loadHistorySync(chatId: number, limit: number = MESSAGES.HISTORY_LOAD_LIMIT): PersistedMessage[] {
   const filePath = getSessionFilePath(chatId);
   
   if (!fs.existsSync(filePath)) {
@@ -218,7 +219,7 @@ export function listSessionFiles(): number[] {
 export async function searchHistory(
   chatId: number,
   query: string,
-  limit: number = 10
+  limit: number = MESSAGES.SEARCH_LIMIT
 ): Promise<PersistedMessage[]> {
   const all = await loadHistory(chatId, 0); // 전부 로드
   const lowerQuery = query.toLowerCase();

@@ -51,3 +51,25 @@ export const MAX_SEARCH_RESULTS = 20;
 // ============== Memory ==============
 export const DEFAULT_MEMORY_SEARCH_LIMIT = 5;
 export const DEFAULT_MEMORY_MIN_SCORE = 0.3;
+/** Memory preview length in search results */
+export const MEMORY_PREVIEW_LENGTH = 200;
+/** Context extraction length for memory search */
+export const SEARCH_CONTEXT_LENGTH = 500;
+/** Memory search limit for prompt context (fewer, more relevant) */
+export const PROMPT_MEMORY_SEARCH_LIMIT = 3;
+/** Minimum score for prompt memory search (stricter) */
+export const PROMPT_MEMORY_MIN_SCORE = 0.4;
+
+// ============== Token Estimation ==============
+/** Tokens per Korean character (보수적 추정) */
+export const TOKENS_PER_KOREAN_CHAR = 1.5;
+/** Characters per token for non-Korean text */
+export const CHARS_PER_TOKEN_OTHER = 4;
+/** Per-message token overhead */
+export const MESSAGE_TOKEN_OVERHEAD = 4;
+
+// ============== Tool Usage Logging ==============
+/** Max length for tool input summary in history */
+export const TOOL_INPUT_SUMMARY_LENGTH = 200;
+/** Max length for tool output summary in history */
+export const TOOL_OUTPUT_SUMMARY_LENGTH = 500;

@@ -1,5 +1,5 @@
 import * as readline from "readline";
-import { checkbox, input, confirm, Separator } from "@inquirer/prompts";
+import { checkbox, select, input, confirm, Separator } from "@inquirer/prompts";
 import { getSecret, setSecret } from "../config/secrets.js";
 import {
   isWorkspaceInitialized,
@@ -71,20 +71,10 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
       selectedValues = await checkbox({
         message: "추가 기능 선택 (Space=선택, Enter=확정)",
         choices: [
-          { 
-            name: "🔍 웹 검색 - 최신 정보 검색 (Brave API, 무료 2000/월)", 
-            value: "webSearch" 
-          },
-          { 
-            name: "📅 캘린더 - Google Calendar 일정 확인/추가", 
-            value: "calendar" 
-          },
-          { 
-            name: "🌤️  날씨 - 현재 날씨, 브리핑 (OpenWeatherMap, 무료)", 
-            value: "weather" 
-          },
-          new Separator("───────────────────────────────────────────"),
-          new Separator("● 건너뛰기 - 바로 Enter를 누르세요"),
+          { name: "🔍 웹 검색 - Brave API, 무료 2000/월", value: "webSearch" },
+          { name: "📅 캘린더 - Google Calendar 연동", value: "calendar" },
+          { name: "🌤️  날씨 - OpenWeatherMap, 무료", value: "weather" },
+          { name: "● 건너뛰기", value: "skip" },
         ],
       });
     } catch {
@@ -93,9 +83,12 @@ CompanionBot은 Telegram에서 동작하는 개인 AI 비서예요.
       return false;
     }
 
-    features.webSearch = selectedValues.includes("webSearch");
-    features.calendar = selectedValues.includes("calendar");
-    features.weather = selectedValues.includes("weather");
+    // 건너뛰기 선택 안했으면 선택된 기능 활성화
+    if (!selectedValues.includes("skip")) {
+      features.webSearch = selectedValues.includes("webSearch");
+      features.calendar = selectedValues.includes("calendar");
+      features.weather = selectedValues.includes("weather");
+    }
 
     // 선택 요약
     const selectedFeatures = [];

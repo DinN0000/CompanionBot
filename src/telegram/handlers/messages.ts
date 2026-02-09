@@ -77,46 +77,56 @@ async function sendStreamingResponse(
   const UPDATE_INTERVAL = 500; // 0.5초마다 업데이트 (Telegram rate limit 고려)
   let lastText = "";
 
-  const result = await chatSmart(
-    messages,
-    systemPrompt,
-    modelId,
-    async (_chunk: string, accumulated: string) => {
-      const now = Date.now();
-      // 0.5초마다 또는 충분히 변경되었을 때 업데이트
-      if (now - lastUpdate > UPDATE_INTERVAL && accumulated !== lastText) {
-        try {
-          await ctx.api.editMessageText(chatId, messageId, accumulated + " ▌");
-          lastUpdate = now;
-          lastText = accumulated;
-        } catch {
-          // rate limit 등 무시
+  try {
+    const result = await chatSmart(
+      messages,
+      systemPrompt,
+      modelId,
+      async (_chunk: string, accumulated: string) => {
+        const now = Date.now();
+        // 0.5초마다 또는 충분히 변경되었을 때 업데이트
+        if (now - lastUpdate > UPDATE_INTERVAL && accumulated !== lastText) {
+          try {
+            await ctx.api.editMessageText(chatId, messageId, accumulated + " ▌");
+            lastUpdate = now;
+            lastText = accumulated;
+          } catch {
+            // rate limit 등 무시
+          }
         }
       }
-    }
-  );
+    );
 
-  // 도구를 사용한 경우 스트리밍이 안됐으므로 새 응답 전송
-  if (result.usedTools) {
-    // placeholder 메시지를 최종 결과로 교체
+    // 도구를 사용한 경우 스트리밍이 안됐으므로 새 응답 전송
+    if (result.usedTools) {
+      // placeholder 메시지를 최종 결과로 교체
+      try {
+        await ctx.api.editMessageText(chatId, messageId, result.text);
+      } catch {
+        // 실패시 새 메시지로 전송
+        await ctx.api.deleteMessage(chatId, messageId);
+        await ctx.reply(result.text);
+      }
+      return result.text;
+    }
+
+    // 최종 메시지 업데이트 (커서 제거)
     try {
       await ctx.api.editMessageText(chatId, messageId, result.text);
     } catch {
-      // 실패시 새 메시지로 전송
-      await ctx.api.deleteMessage(chatId, messageId);
-      await ctx.reply(result.text);
+      // 이미 동일 텍스트면 에러 발생 가능 - 무시
     }
+
     return result.text;
+  } catch (error) {
+    // 에러 발생 시 placeholder 삭제
+    try {
+      await ctx.api.deleteMessage(chatId, messageId);
+    } catch {
+      // 삭제 실패해도 계속 진행
+    }
+    throw error; // 에러 재전파
   }
-
-  // 최종 메시지 업데이트 (커서 제거)
-  try {
-    await ctx.api.editMessageText(chatId, messageId, result.text);
-  } catch {
-    // 이미 동일 텍스트면 에러 발생 가능 - 무시
-  }
-
-  return result.text;
 }
 
 /**
@@ -288,10 +298,10 @@ export function registerMessageHandlers(bot: Bot): void {
           await ctx.reply("지금 요청이 많아서 잠깐 쉬어야 해. 30초 후에 다시 시도해줄래?");
         } else if (errorMsg.includes("timeout") || errorMsg.includes("ETIMEDOUT")) {
           await ctx.reply("응답이 너무 오래 걸려서 중단됐어. 다시 시도해줄래?");
-        } else if (errorMsg.includes("context") || errorMsg.includes("token")) {
+        } else if (errorMsg.includes("context_length") || errorMsg.includes("too many tokens") || errorMsg.includes("maximum context")) {
           await ctx.reply("대화가 너무 길어졌어. /compact 로 정리하고 다시 시도해줘!");
         } else {
-          await ctx.reply("메시지 처리 중 문제가 생겼어. 다시 시도해줄래?");
+          await ctx.reply(`문제가 생겼어: ${errorMsg.slice(0, 100)}`);
         }
       }
     });

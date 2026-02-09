@@ -210,10 +210,10 @@ async function executeAgentTurn(
 - This is a scheduled task, not a direct user message.`;
 
     // Call Claude API
-    const response = await chat(messages, systemPrompt, "sonnet");
+    const result = await chat(messages, systemPrompt, "sonnet");
 
     // Send the response to the chat
-    const trimmedResponse = response?.trim();
+    const trimmedResponse = result.text?.trim();
     if (trimmedResponse) {
       // Split long messages (Telegram limit is 4096 characters)
       const maxLength = TELEGRAM_SAFE_LIMIT;

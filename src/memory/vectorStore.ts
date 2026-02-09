@@ -1,6 +1,7 @@
 /**
  * 간단한 벡터 저장소 모듈
  * 메모리 파일들을 로드하고 유사도 기반으로 검색합니다.
+ * 임베딩은 파일에 캐시되어 재시작 후에도 유지됩니다.
  */
 
 import * as fs from "fs/promises";
@@ -12,6 +13,7 @@ export interface MemoryChunk {
   text: string;
   source: string;
   embedding?: number[];
+  hash?: string; // 텍스트 변경 감지용
 }
 
 export interface SearchResult {
@@ -25,8 +27,64 @@ let cachedChunks: MemoryChunk[] = [];
 let cacheTimestamp = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5분
 
+// 임베딩 영속 캐시 (hash → embedding)
+let embeddingCache: Map<string, number[]> = new Map();
+let embeddingCacheLoaded = false;
+
 // 로딩 중복 방지용 Promise
 let loadingPromise: Promise<MemoryChunk[]> | null = null;
+
+/**
+ * 간단한 해시 함수 (텍스트 변경 감지용)
+ */
+function simpleHash(text: string): string {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // 32bit 정수로 변환
+  }
+  return hash.toString(16);
+}
+
+/**
+ * 임베딩 캐시 파일 경로
+ */
+function getEmbeddingCachePath(): string {
+  return path.join(getMemoryDirPath(), ".embedding-cache.json");
+}
+
+/**
+ * 임베딩 캐시를 파일에서 로드합니다.
+ */
+async function loadEmbeddingCache(): Promise<void> {
+  if (embeddingCacheLoaded) return;
+  
+  try {
+    const cachePath = getEmbeddingCachePath();
+    const data = await fs.readFile(cachePath, "utf-8");
+    const parsed = JSON.parse(data) as Record<string, number[]>;
+    embeddingCache = new Map(Object.entries(parsed));
+    console.log(`[VectorStore] Loaded ${embeddingCache.size} cached embeddings`);
+  } catch {
+    // 파일 없거나 파싱 실패 - 새로 시작
+    embeddingCache = new Map();
+  }
+  embeddingCacheLoaded = true;
+}
+
+/**
+ * 임베딩 캐시를 파일에 저장합니다.
+ */
+async function saveEmbeddingCache(): Promise<void> {
+  try {
+    const cachePath = getEmbeddingCachePath();
+    const obj = Object.fromEntries(embeddingCache);
+    await fs.writeFile(cachePath, JSON.stringify(obj), "utf-8");
+  } catch (error) {
+    console.warn("[VectorStore] Failed to save embedding cache:", error);
+  }
+}
 
 /**
  * 텍스트를 적절한 크기의 청크로 분할합니다.
@@ -49,7 +107,11 @@ function splitIntoChunks(text: string, source: string): MemoryChunk[] {
       for (const line of lines) {
         if (currentChunk.length + line.length > 500) {
           if (currentChunk.trim()) {
-            chunks.push({ text: currentChunk.trim(), source });
+            chunks.push({ 
+              text: currentChunk.trim(), 
+              source,
+              hash: simpleHash(currentChunk.trim())
+            });
           }
           currentChunk = line;
         } else {
@@ -58,10 +120,18 @@ function splitIntoChunks(text: string, source: string): MemoryChunk[] {
       }
       
       if (currentChunk.trim()) {
-        chunks.push({ text: currentChunk.trim(), source });
+        chunks.push({ 
+          text: currentChunk.trim(), 
+          source,
+          hash: simpleHash(currentChunk.trim())
+        });
       }
     } else {
-      chunks.push({ text: trimmed, source });
+      chunks.push({ 
+        text: trimmed, 
+        source,
+        hash: simpleHash(trimmed)
+      });
     }
   }
   
@@ -72,13 +142,16 @@ function splitIntoChunks(text: string, source: string): MemoryChunk[] {
  * 내부 로드 로직 - 실제 파일 로드 수행
  */
 async function doLoadAllMemoryChunks(): Promise<MemoryChunk[]> {
+  // 임베딩 캐시 로드
+  await loadEmbeddingCache();
+  
   const chunks: MemoryChunk[] = [];
 
   // 1. 일별 메모리 파일 (최근 30일)
   const memoryDir = getMemoryDirPath();
   try {
     const files = await fs.readdir(memoryDir);
-    const mdFiles = files.filter(f => f.endsWith(".md")).sort().reverse().slice(0, 30);
+    const mdFiles = files.filter(f => f.endsWith(".md") && !f.startsWith(".")).sort().reverse().slice(0, 30);
     
     for (const file of mdFiles) {
       try {
@@ -101,6 +174,16 @@ async function doLoadAllMemoryChunks(): Promise<MemoryChunk[]> {
     chunks.push(...memoryChunks);
   } catch {
     // 파일 없음 무시
+  }
+
+  // 3. 캐시된 임베딩 복원
+  for (const chunk of chunks) {
+    if (chunk.hash) {
+      const cachedEmbedding = embeddingCache.get(chunk.hash);
+      if (cachedEmbedding) {
+        chunk.embedding = cachedEmbedding;
+      }
+    }
   }
 
   return chunks;
@@ -162,23 +245,36 @@ export async function search(
   const chunksNeedingEmbedding = chunks.filter(c => !c.embedding);
   
   if (chunksNeedingEmbedding.length > 0) {
+    console.log(`[VectorStore] Generating embeddings for ${chunksNeedingEmbedding.length} chunks`);
+    
     try {
       const texts = chunksNeedingEmbedding.map(c => c.text);
       const embeddings = await embedBatch(texts);
       
-      // 임베딩 할당
+      // 임베딩 할당 및 캐시 저장
       for (let i = 0; i < chunksNeedingEmbedding.length; i++) {
-        chunksNeedingEmbedding[i].embedding = embeddings[i];
+        const chunk = chunksNeedingEmbedding[i];
+        chunk.embedding = embeddings[i];
+        if (chunk.hash) {
+          embeddingCache.set(chunk.hash, embeddings[i]);
+        }
       }
+      
+      // 캐시 파일 저장 (비동기, 실패해도 무시)
+      saveEmbeddingCache().catch(() => {});
     } catch {
       // 배치 실패 시 개별 처리 폴백
       for (const chunk of chunksNeedingEmbedding) {
         try {
           chunk.embedding = await embed(chunk.text);
+          if (chunk.hash) {
+            embeddingCache.set(chunk.hash, chunk.embedding);
+          }
         } catch {
           // 개별 실패 무시
         }
       }
+      saveEmbeddingCache().catch(() => {});
     }
   }
 
@@ -207,11 +303,27 @@ export async function search(
 
 /**
  * 캐시를 무효화합니다.
+ * 임베딩 캐시는 유지 (텍스트 해시 기반이므로)
  */
 export function invalidateCache(): void {
   cachedChunks = [];
   cacheTimestamp = 0;
   loadingPromise = null;
+}
+
+/**
+ * 임베딩 캐시까지 완전 초기화합니다.
+ */
+export async function clearAllCaches(): Promise<void> {
+  invalidateCache();
+  embeddingCache.clear();
+  embeddingCacheLoaded = false;
+  
+  try {
+    await fs.unlink(getEmbeddingCachePath());
+  } catch {
+    // 파일 없으면 무시
+  }
 }
 
 // 영속적 저장소용 인터페이스

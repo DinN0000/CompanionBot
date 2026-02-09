@@ -6,11 +6,15 @@ import {
   getModel,
   runWithChatId,
   trimHistoryByTokens,
+  smartTrimHistory,
+  detectImportantContext,
+  pinContext,
 } from "../../session/state.js";
 import { updateLastMessageTime } from "../../heartbeat/index.js";
 import {
   extractUrls,
   fetchWebContent,
+  formatUrlContent,
   buildSystemPrompt,
 } from "../utils/index.js";
 import { estimateMessagesTokens } from "../../utils/tokens.js";
@@ -42,12 +46,12 @@ async function autoCompactIfNeeded(
           .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[media]"}`)
           .join("\n");
 
-      const summary = await chat([{ role: "user", content: summaryPrompt }], "", "haiku");
+      const summaryResult = await chat([{ role: "user", content: summaryPrompt }], "", "haiku");
 
       // 히스토리 교체
       const recentMessages = history.slice(-4);
       history.splice(0, history.length);
-      history.push({ role: "user", content: `[이전 대화 요약]\n${summary}` });
+      history.push({ role: "user", content: `[이전 대화 요약]\n${summaryResult.text}` });
       history.push(...recentMessages);
 
       const newTokens = estimateMessagesTokens(history);
@@ -192,12 +196,20 @@ export function registerMessageHandlers(bot: Bot): void {
           const systemPrompt = await buildSystemPrompt(modelId, history);
           const result = await chat(history, systemPrompt, modelId);
 
-          history.push({ role: "assistant", content: result });
+          // 도구 사용 정보를 포함한 응답 기록
+          let assistantContent = result.text;
+          if (result.toolsUsed.length > 0) {
+            const toolsSummary = result.toolsUsed
+              .map(t => `[${t.name}] ${t.output.slice(0, 100)}...`)
+              .join("\n");
+            assistantContent = `[도구 사용: ${result.toolsUsed.map(t => t.name).join(", ")}]\n${toolsSummary}\n\n---\n${result.text}`;
+          }
+          history.push({ role: "assistant", content: assistantContent });
 
           // 토큰 기반 히스토리 트리밍
           trimHistoryByTokens(history);
 
-          await ctx.reply(result);
+          await ctx.reply(result.text);
         } catch (innerError) {
           // 에러 발생해도 사용자 메시지는 보존 (대화 컨텍스트 유지)
           // 에러 응답을 assistant로 기록해서 role 교대 유지
@@ -255,11 +267,19 @@ export function registerMessageHandlers(bot: Bot): void {
       const history = getHistory(chatId);
       const modelId = getModel(chatId);
 
+      // 중요 맥락 자동 감지 및 핀
+      const importantContext = detectImportantContext(userMessage);
+      if (importantContext) {
+        pinContext(chatId, importantContext, "auto");
+        console.log(`[AutoPin] chatId=${chatId}: ${importantContext.slice(0, 50)}...`);
+      }
+
       await ctx.replyWithChatAction("typing");
 
       // URL 감지 및 내용 가져오기 (병렬 처리)
       const urls = extractUrls(userMessage);
-      let enrichedMessage = userMessage;
+      let messageForHistory = userMessage;
+      let urlContextForApi = ""; // 현재 요청에만 주입될 URL 내용
 
       if (urls.length > 0) {
         const urlsToFetch = urls.slice(0, 3); // 최대 3개 URL
@@ -267,39 +287,69 @@ export function registerMessageHandlers(bot: Bot): void {
           urlsToFetch.map((url) => fetchWebContent(url))
         );
 
-        const webContents = contents
-          .map((content, index) => {
-            if (!content) return null;
-            return `\n\n---\n📎 Link: ${urlsToFetch[index]}\n📌 Title: ${content.title}\n📄 Content:\n${content.content}\n---`;
-          })
-          .filter((item): item is string => item !== null);
+        const urlRefs: string[] = [];
+        
+        for (let i = 0; i < contents.length; i++) {
+          const content = contents[i];
+          if (!content) continue;
+          
+          const formatted = formatUrlContent(urlsToFetch[i], content);
+          urlRefs.push(formatted.forHistory);
+          urlContextForApi += formatted.forContext;
+        }
 
-        if (webContents.length > 0) {
-          enrichedMessage = userMessage + webContents.join("\n");
+        // 히스토리에는 간략한 링크 참조만 저장
+        if (urlRefs.length > 0) {
+          messageForHistory = userMessage + "\n\n" + urlRefs.join("\n");
         }
       }
 
-      // 사용자 메시지 추가 (URL 내용 포함)
-      history.push({ role: "user", content: enrichedMessage });
+      // 히스토리에는 간략 버전 저장
+      history.push({ role: "user", content: messageForHistory });
 
       try {
         const systemPrompt = await buildSystemPrompt(modelId, history);
         
+        // API 호출용 메시지 준비 (URL 전체 내용 포함)
+        const messagesForApi = [...history];
+        if (urlContextForApi) {
+          // 마지막 user 메시지에 URL 내용 추가 (API 호출 시에만)
+          const lastIdx = messagesForApi.length - 1;
+          const lastMsg = messagesForApi[lastIdx];
+          if (typeof lastMsg.content === "string") {
+            messagesForApi[lastIdx] = {
+              ...lastMsg,
+              content: lastMsg.content + urlContextForApi
+            };
+          }
+        }
+        
         // 스트리밍 응답 사용 (실시간 업데이트)
         const response = await sendStreamingResponse(
           ctx,
-          history,
+          messagesForApi, // URL 내용이 포함된 버전
           systemPrompt,
           modelId
         );
 
         history.push({ role: "assistant", content: response });
 
-        // 토큰 기반 히스토리 트리밍
-        trimHistoryByTokens(history);
-
-        // 자동 compaction 체크
-        await autoCompactIfNeeded(ctx, history);
+        // 스마트 트리밍 (요약 포함) - autoCompactIfNeeded 대체
+        const summarizeFn = async (messages: Message[]) => {
+          const summaryPrompt =
+            "다음 대화를 핵심만 3-4문장으로 요약해. 중요한 정보(이름, 선호도, 약속 등)는 반드시 포함:\n\n" +
+            messages
+              .map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[media]"}`)
+              .join("\n");
+          const result = await chat([{ role: "user", content: summaryPrompt }], "", "haiku");
+          return result.text;
+        };
+        
+        const wasSummarized = await smartTrimHistory(chatId, summarizeFn);
+        if (!wasSummarized) {
+          // 요약 안 됐으면 기본 트리밍
+          trimHistoryByTokens(history);
+        }
       } catch (error) {
         recordError();
         

@@ -441,17 +441,35 @@ Guidelines:
   },
   {
     name: "save_memory",
-    description: "Save important information about the user or conversation to long-term memory. Use this when you learn something new about the user that should be remembered.",
+    description: `Save important information to daily memory. This is automatically saved to memory/YYYY-MM-DD.md.
+
+**WHEN TO USE (proactively, without being asked):**
+- User shares personal info: name, birthday, family, job, location
+- User expresses preferences: likes, dislikes, habits, routines
+- User mentions plans: upcoming events, projects, goals
+- User shares emotional moments: achievements, concerns, decisions
+- Significant conversation outcomes: agreements, conclusions, learnings
+- Technical context: project names, tech stack, environments
+
+**WHEN NOT TO USE:**
+- Trivial small talk
+- Already recorded information
+- Temporary/fleeting topics
+
+**TIPS:**
+- Be concise but include context (why it matters)
+- Include date references for time-sensitive info
+- Group related facts together`,
     input_schema: {
       type: "object" as const,
       properties: {
         content: {
           type: "string",
-          description: "The information to remember",
+          description: "The information to remember. Be specific and include context.",
         },
         category: {
           type: "string",
-          enum: ["user_info", "preference", "event", "project", "other"],
+          enum: ["user_info", "preference", "event", "project", "decision", "emotion", "other"],
           description: "Category of the memory",
         },
       },

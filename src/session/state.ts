@@ -1,17 +1,45 @@
 import { AsyncLocalStorage } from "async_hooks";
 import type { ModelId } from "../ai/claude.js";
 import type { Message } from "../ai/claude.js";
-import { estimateMessagesTokens } from "../utils/tokens.js";
+import { estimateMessagesTokens, estimateTokens } from "../utils/tokens.js";
 
 // 세션 설정
 const MAX_SESSIONS = 100;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24시간
-const MAX_HISTORY_TOKENS = 40000; // 시스템 프롬프트(~10k) + 응답(~8k) 여유 남기고
+
+// 토큰 한도 (개선됨)
+const MAX_HISTORY_TOKENS = 40000; // 히스토리 한도
+const SUMMARY_THRESHOLD_TOKENS = 25000; // 이 이상이면 요약 시작
+const MIN_RECENT_MESSAGES = 6; // 최소 유지할 최근 메시지
+const MAX_PINNED_TOKENS = 5000; // 핀 맥락 최대 토큰
+
+/**
+ * 핀된 맥락 - 중요한 정보를 별도 보관
+ * 트리밍과 무관하게 시스템 프롬프트에 주입됨
+ */
+export type PinnedContext = {
+  text: string;
+  createdAt: number;
+  source: "auto" | "user"; // 자동 감지 vs 사용자 명시
+};
+
+/**
+ * 요약된 히스토리 청크
+ */
+export type SummaryChunk = {
+  summary: string;
+  messageCount: number;
+  startTime: number;
+  endTime: number;
+};
 
 type SessionData = {
   history: Message[];
   model: ModelId;
   lastAccessedAt: number;
+  // 새 필드들
+  pinnedContexts: PinnedContext[];
+  summaryChunks: SummaryChunk[];
 };
 
 // 세션별 상태 저장
@@ -24,11 +52,12 @@ function getSession(chatId: number): SessionData {
   // chatId 유효성 검사
   if (chatId == null || isNaN(chatId)) {
     console.error(`[Session] BUG: Invalid chatId: ${chatId} - history will NOT persist!`);
-    // 임시 세션 반환 (저장하지 않음) - 이건 버그 상황
     return {
       history: [],
       model: "sonnet",
       lastAccessedAt: Date.now(),
+      pinnedContexts: [],
+      summaryChunks: [],
     };
   }
 
@@ -37,7 +66,9 @@ function getSession(chatId: number): SessionData {
 
   if (existing) {
     existing.lastAccessedAt = now;
-    console.log(`[Session] Returning existing session for chatId=${chatId}, history length=${existing.history?.length ?? 0}`);
+    // 마이그레이션: 기존 세션에 새 필드 추가
+    if (!existing.pinnedContexts) existing.pinnedContexts = [];
+    if (!existing.summaryChunks) existing.summaryChunks = [];
     return existing;
   }
 
@@ -48,6 +79,8 @@ function getSession(chatId: number): SessionData {
     history: [],
     model: "sonnet",
     lastAccessedAt: now,
+    pinnedContexts: [],
+    summaryChunks: [],
   };
   sessions.set(chatId, session);
   console.log(`[Session] Created new session for chatId=${chatId}, total sessions=${sessions.size}`);
@@ -78,30 +111,278 @@ function cleanupSessions(): void {
 
 export function getHistory(chatId: number): Message[] {
   const session = getSession(chatId);
-  // history가 없으면 초기화하고 세션에 저장
   if (!session.history) {
     session.history = [];
   }
-  // 참조 반환 (외부 수정 허용 - 의도적)
   return session.history;
 }
 
 /**
- * 히스토리를 토큰 기반으로 트리밍한다.
- * 최대 토큰 한도를 초과하면 가장 오래된 메시지부터 제거 (최소 2개는 유지).
+ * 핀된 맥락 가져오기
  */
-export function trimHistoryByTokens(history: Message[] | null | undefined): void {
-  // null/undefined/빈 배열 처리
-  if (!history || history.length === 0) {
-    return;
-  }
+export function getPinnedContexts(chatId: number): PinnedContext[] {
+  return getSession(chatId).pinnedContexts;
+}
+
+/**
+ * 요약 청크 가져오기
+ */
+export function getSummaryChunks(chatId: number): SummaryChunk[] {
+  return getSession(chatId).summaryChunks;
+}
+
+/**
+ * 중요 맥락 핀하기
+ */
+export function pinContext(chatId: number, text: string, source: "auto" | "user" = "user"): boolean {
+  const session = getSession(chatId);
+  const currentTokens = session.pinnedContexts.reduce(
+    (sum, p) => sum + estimateTokens(p.text),
+    0
+  );
+
+  const newTokens = estimateTokens(text);
   
-  while (estimateMessagesTokens(history) > MAX_HISTORY_TOKENS && history.length > 2) {
-    history.shift();
+  // 토큰 한도 체크
+  if (currentTokens + newTokens > MAX_PINNED_TOKENS) {
+    // 오래된 자동 핀부터 제거
+    while (
+      session.pinnedContexts.length > 0 &&
+      currentTokens + newTokens > MAX_PINNED_TOKENS
+    ) {
+      const autoIndex = session.pinnedContexts.findIndex((p) => p.source === "auto");
+      if (autoIndex >= 0) {
+        session.pinnedContexts.splice(autoIndex, 1);
+      } else {
+        // 자동 핀 없으면 추가 불가
+        return false;
+      }
+    }
+  }
+
+  session.pinnedContexts.push({
+    text,
+    createdAt: Date.now(),
+    source,
+  });
+
+  console.log(`[Pin] chatId=${chatId} added pin (${source}): ${text.slice(0, 50)}...`);
+  return true;
+}
+
+/**
+ * 핀 제거
+ */
+export function unpinContext(chatId: number, index: number): boolean {
+  const session = getSession(chatId);
+  if (index >= 0 && index < session.pinnedContexts.length) {
+    session.pinnedContexts.splice(index, 1);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 모든 핀 제거
+ */
+export function clearPins(chatId: number): void {
+  getSession(chatId).pinnedContexts = [];
+}
+
+/**
+ * 요약 청크 추가
+ */
+export function addSummaryChunk(chatId: number, chunk: SummaryChunk): void {
+  const session = getSession(chatId);
+  session.summaryChunks.push(chunk);
+  
+  // 오래된 요약은 병합 (최대 3개 유지)
+  while (session.summaryChunks.length > 3) {
+    const [first, second] = session.summaryChunks.splice(0, 2);
+    session.summaryChunks.unshift({
+      summary: `${first.summary}\n\n${second.summary}`,
+      messageCount: first.messageCount + second.messageCount,
+      startTime: first.startTime,
+      endTime: second.endTime,
+    });
   }
 }
 
+/**
+ * 개선된 히스토리 트리밍
+ * 
+ * 전략:
+ * 1. 최근 N개 메시지는 반드시 유지
+ * 2. 토큰이 임계치 초과하면 오래된 메시지 제거 (요약 청크로 변환 가능)
+ * 3. 핀된 맥락은 별도로 보존됨 (여기서 처리 안 함)
+ */
+export function trimHistoryByTokens(history: Message[] | null | undefined): void {
+  if (!history || history.length === 0) {
+    return;
+  }
+
+  const currentTokens = estimateMessagesTokens(history);
+  
+  // 한도 이내면 패스
+  if (currentTokens <= MAX_HISTORY_TOKENS) {
+    return;
+  }
+
+  console.log(`[Trim] Starting trim: ${currentTokens} tokens, ${history.length} messages`);
+
+  // 최근 메시지는 반드시 유지
+  while (estimateMessagesTokens(history) > MAX_HISTORY_TOKENS && history.length > MIN_RECENT_MESSAGES) {
+    history.shift();
+  }
+
+  const afterTokens = estimateMessagesTokens(history);
+  console.log(`[Trim] After trim: ${afterTokens} tokens, ${history.length} messages`);
+}
+
+/**
+ * 스마트 트리밍 - 요약과 함께 수행
+ * 
+ * @param chatId 채팅 ID
+ * @param summarizeFn 요약 함수 (외부 주입 - API 호출 필요)
+ * @returns 요약이 수행되었는지 여부
+ */
+export async function smartTrimHistory(
+  chatId: number,
+  summarizeFn?: (messages: Message[]) => Promise<string>
+): Promise<boolean> {
+  const session = getSession(chatId);
+  const history = session.history;
+
+  if (!history || history.length === 0) {
+    return false;
+  }
+
+  const currentTokens = estimateMessagesTokens(history);
+
+  // 요약 임계치 이하면 패스
+  if (currentTokens <= SUMMARY_THRESHOLD_TOKENS) {
+    return false;
+  }
+
+  // 요약 함수가 없으면 기본 트리밍만
+  if (!summarizeFn) {
+    trimHistoryByTokens(history);
+    return false;
+  }
+
+  console.log(`[SmartTrim] chatId=${chatId} tokens=${currentTokens}, starting summarization...`);
+
+  // 오래된 메시지들 (최근 6개 제외)
+  const toSummarize = history.slice(0, -MIN_RECENT_MESSAGES);
+  const toKeep = history.slice(-MIN_RECENT_MESSAGES);
+
+  if (toSummarize.length < 4) {
+    // 요약할 게 별로 없으면 기본 트리밍
+    trimHistoryByTokens(history);
+    return false;
+  }
+
+  try {
+    const summary = await summarizeFn(toSummarize);
+
+    // 요약 청크 저장
+    addSummaryChunk(chatId, {
+      summary,
+      messageCount: toSummarize.length,
+      startTime: Date.now() - (toSummarize.length * 60000), // 대략적인 시간
+      endTime: Date.now(),
+    });
+
+    // 히스토리 교체: [요약 메시지] + [최근 메시지들]
+    history.splice(0, history.length);
+    history.push({ 
+      role: "user", 
+      content: `[이전 대화 요약]\n${summary}` 
+    });
+    history.push({ 
+      role: "assistant", 
+      content: "네, 이전 대화 내용을 기억하고 있어요." 
+    });
+    history.push(...toKeep);
+
+    const afterTokens = estimateMessagesTokens(history);
+    console.log(`[SmartTrim] chatId=${chatId} summarized: ${currentTokens} → ${afterTokens} tokens`);
+
+    return true;
+  } catch (error) {
+    console.error(`[SmartTrim] Failed to summarize:`, error);
+    // 실패하면 기본 트리밍으로 폴백
+    trimHistoryByTokens(history);
+    return false;
+  }
+}
+
+/**
+ * 중요 맥락 자동 감지
+ * 
+ * 패턴:
+ * - "기억해", "잊지 마", "remember"
+ * - 이름, 선호도, 중요 정보 언급
+ * - 명시적 핀 요청
+ */
+export function detectImportantContext(message: string): string | null {
+  const patterns = [
+    /기억해[줘요]?\s*[:：]?\s*(.+)/i,
+    /잊지\s*마[줘요]?\s*[:：]?\s*(.+)/i,
+    /remember\s*[:：]?\s*(.+)/i,
+    /내\s*이름은?\s+(.+?)(?:이야|야|입니다|예요|요)?[.!]?\s*$/i,
+    /나는?\s+(.+?)(?:을|를)?\s*(?:좋아해|싫어해|선호해)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 시스템 프롬프트용 맥락 문자열 생성
+ */
+export function buildContextForPrompt(chatId: number): string {
+  const session = getSession(chatId);
+  const parts: string[] = [];
+
+  // 핀된 맥락
+  if (session.pinnedContexts.length > 0) {
+    parts.push("## 📌 중요 맥락 (사용자가 기억해달라고 한 것들)");
+    session.pinnedContexts.forEach((p, i) => {
+      parts.push(`${i + 1}. ${p.text}`);
+    });
+  }
+
+  // 요약 청크 (있으면)
+  if (session.summaryChunks.length > 0) {
+    parts.push("\n## 📜 이전 대화 요약");
+    session.summaryChunks.forEach((chunk) => {
+      parts.push(`- ${chunk.summary}`);
+    });
+  }
+
+  return parts.join("\n");
+}
+
 export function clearHistory(chatId: number): void {
+  const session = sessions.get(chatId);
+  if (session) {
+    session.history = [];
+    session.summaryChunks = [];
+    // 핀은 유지 (중요 맥락이므로)
+  }
+}
+
+/**
+ * 완전 초기화 (핀 포함)
+ */
+export function clearSession(chatId: number): void {
   sessions.delete(chatId);
 }
 
@@ -113,30 +394,43 @@ export function setModel(chatId: number, modelId: ModelId): void {
   getSession(chatId).model = modelId;
 }
 
-/**
- * Run a function with chatId context using AsyncLocalStorage.
- * All code inside the callback can access the chatId via getCurrentChatId().
- */
 export function runWithChatId<T>(chatId: number, fn: () => T): T {
   return chatIdStorage.run(chatId, fn);
 }
 
-/**
- * Get the current chatId from AsyncLocalStorage context.
- * Returns null if called outside of runWithChatId().
- */
 export function getCurrentChatId(): number | null {
   return chatIdStorage.getStore() ?? null;
 }
 
-// 세션 정리 (수동 호출용)
 export function cleanupExpiredSessions(): number {
   const before = sessions.size;
   cleanupSessions();
   return before - sessions.size;
 }
 
-// 현재 세션 수 조회
 export function getSessionCount(): number {
   return sessions.size;
+}
+
+/**
+ * 세션 통계 (디버그용)
+ */
+export function getSessionStats(chatId: number): {
+  historyLength: number;
+  historyTokens: number;
+  pinnedCount: number;
+  pinnedTokens: number;
+  summaryCount: number;
+} {
+  const session = getSession(chatId);
+  return {
+    historyLength: session.history.length,
+    historyTokens: estimateMessagesTokens(session.history),
+    pinnedCount: session.pinnedContexts.length,
+    pinnedTokens: session.pinnedContexts.reduce(
+      (sum, p) => sum + estimateTokens(p.text),
+      0
+    ),
+    summaryCount: session.summaryChunks.length,
+  };
 }

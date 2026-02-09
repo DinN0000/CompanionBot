@@ -24,8 +24,8 @@ ${conversationText}
   
   try {
     // haiku로 빠르게 요약 생성
-    const summary = await chat(summaryPrompt, undefined, "haiku");
-    return summary;
+    const result = await chat(summaryPrompt, undefined, "haiku");
+    return result.text;
   } catch (error) {
     console.error("Summary generation error:", error);
     return "이전 대화 내용 (요약 생성 실패)";
@@ -59,6 +59,11 @@ import {
   getModel,
   setModel,
   runWithChatId,
+  getPinnedContexts,
+  pinContext,
+  unpinContext,
+  clearPins,
+  getSessionStats,
 } from "../../session/state.js";
 import {
   hasBootstrap,
@@ -125,9 +130,9 @@ export function registerCommands(bot: Bot): void {
         });
 
         try {
-          const response = await chat(history, systemPrompt, modelId);
-          history.push({ role: "assistant", content: response });
-          await ctx.reply(response);
+          const result = await chat(history, systemPrompt, modelId);
+          history.push({ role: "assistant", content: result.text });
+          await ctx.reply(result.text);
         } catch (error) {
           console.error("Bootstrap start error:", error);
           await ctx.reply(
@@ -782,6 +787,116 @@ export function registerCommands(bot: Bot): void {
       `💬 메시지: ${status.messageCount}개\n` +
       `❌ 에러: ${status.errorCount}개\n` +
       `🔋 상태: ${status.isHealthy ? "정상 ✅" : "점검 필요 ⚠️"}`
+    );
+  });
+
+  // /pin 명령어 - 중요 맥락 핀하기
+  bot.command("pin", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const text = ctx.message?.text?.split(" ").slice(1).join(" ");
+
+    if (!text) {
+      await ctx.reply(
+        "📌 핀 사용법\n\n" +
+        "중요한 정보를 핀해서 대화가 길어져도 기억하게 해요.\n\n" +
+        "예시:\n" +
+        "/pin 내 이름은 민수야\n" +
+        "/pin 나는 채식주의자야\n" +
+        "/pin 다음주 화요일 치과 예약\n\n" +
+        "또는 대화 중에 \"기억해: ...\" 라고 하면 자동으로 핀됩니다."
+      );
+      return;
+    }
+
+    const success = pinContext(chatId, text, "user");
+    if (success) {
+      await ctx.reply(`📌 핀됨: "${text.slice(0, 50)}${text.length > 50 ? "..." : ""}"\n\n대화가 길어져도 이 정보는 항상 기억할게요!`);
+    } else {
+      await ctx.reply("핀 한도(~5000 토큰)에 도달했어요. /pins 에서 일부를 삭제해주세요.");
+    }
+  });
+
+  // /pins 명령어 - 핀 목록 보기
+  bot.command("pins", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const pins = getPinnedContexts(chatId);
+
+    if (pins.length === 0) {
+      await ctx.reply(
+        "📌 핀된 맥락이 없어요.\n\n" +
+        "/pin [내용] 으로 중요한 정보를 핀해보세요."
+      );
+      return;
+    }
+
+    let message = "📌 핀된 맥락\n\n";
+    pins.forEach((pin, i) => {
+      const source = pin.source === "auto" ? "🤖" : "👤";
+      const time = new Date(pin.createdAt).toLocaleDateString("ko-KR");
+      message += `${i + 1}. ${source} ${pin.text.slice(0, 60)}${pin.text.length > 60 ? "..." : ""}\n   📅 ${time}\n\n`;
+    });
+
+    message += "삭제: /unpin [번호] 또는 /clear_pins (전체)";
+
+    await ctx.reply(message);
+  });
+
+  // /unpin 명령어 - 핀 삭제
+  bot.command("unpin", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const arg = ctx.message?.text?.split(" ")[1];
+
+    if (!arg) {
+      await ctx.reply("사용법: /unpin [번호]\n\n/pins 에서 번호를 확인하세요.");
+      return;
+    }
+
+    const index = parseInt(arg) - 1; // 1-based to 0-based
+    const pins = getPinnedContexts(chatId);
+
+    if (isNaN(index) || index < 0 || index >= pins.length) {
+      await ctx.reply(`유효하지 않은 번호예요. 1-${pins.length} 사이로 입력해주세요.`);
+      return;
+    }
+
+    const removed = pins[index].text;
+    const success = unpinContext(chatId, index);
+    
+    if (success) {
+      await ctx.reply(`📌 핀 삭제됨: "${removed.slice(0, 40)}..."`);
+    } else {
+      await ctx.reply("핀 삭제에 실패했어요.");
+    }
+  });
+
+  // /clear_pins 명령어 - 모든 핀 삭제
+  bot.command("clear_pins", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const pins = getPinnedContexts(chatId);
+
+    if (pins.length === 0) {
+      await ctx.reply("삭제할 핀이 없어요.");
+      return;
+    }
+
+    clearPins(chatId);
+    await ctx.reply(`📌 ${pins.length}개 핀이 모두 삭제되었습니다.`);
+  });
+
+  // /context 명령어 - 현재 맥락 상태 확인
+  bot.command("context", async (ctx) => {
+    const chatId = ctx.chat.id;
+    const stats = getSessionStats(chatId);
+
+    await ctx.reply(
+      `📊 맥락 상태\n\n` +
+      `💬 히스토리: ${stats.historyLength}개 메시지 (~${stats.historyTokens} 토큰)\n` +
+      `📌 핀: ${stats.pinnedCount}개 (~${stats.pinnedTokens} 토큰)\n` +
+      `📜 요약: ${stats.summaryCount}개\n\n` +
+      `명령어:\n` +
+      `/pins - 핀 목록\n` +
+      `/compact - 히스토리 압축\n` +
+      `/clear - 히스토리 초기화 (핀 유지)`
     );
   });
 }

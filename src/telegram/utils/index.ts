@@ -1,5 +1,5 @@
 // URL utilities
-export { extractUrls, fetchWebContent, isSafeUrl } from "./url.js";
+export { extractUrls, fetchWebContent, isSafeUrl, formatUrlContent, clearUrlCache } from "./url.js";
 
 // Prompt utilities
 export { buildSystemPrompt, extractName } from "./prompt.js";

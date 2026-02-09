@@ -104,13 +104,25 @@ export const MODELS: Record<ModelId, ModelConfig> = {
   },
 };
 
+export type ToolUseSummary = {
+  name: string;
+  input: string;
+  output: string;
+};
+
+export type ChatResult = {
+  text: string;
+  toolsUsed: ToolUseSummary[];
+};
+
 export async function chat(
   messages: Message[],
   systemPrompt?: string,
   modelId: ModelId = "sonnet"
-): Promise<string> {
+): Promise<ChatResult> {
   const client = getClient();
   const modelConfig = MODELS[modelId];
+  const toolsUsed: ToolUseSummary[] = [];
 
   // 메시지를 API 형식으로 변환
   const apiMessages: Anthropic.MessageParam[] = messages.map((m) => ({
@@ -177,6 +189,13 @@ export async function chat(
         tool_use_id: toolUse.id,
         content: truncatedResult,
       });
+
+      // 도구 사용 기록 (히스토리 참조용)
+      toolsUsed.push({
+        name: toolUse.name,
+        input: JSON.stringify(toolUse.input).slice(0, 200),
+        output: truncatedResult.slice(0, 500),
+      });
     }
 
     // 어시스턴트 메시지와 도구 결과 추가
@@ -197,7 +216,7 @@ export async function chat(
   // 반복 횟수 초과 시 경고
   if (iterations >= MAX_TOOL_ITERATIONS) {
     console.warn(`[Warning] Tool use loop reached max iterations (${MAX_TOOL_ITERATIONS})`);
-    return "도구 실행이 너무 많이 반복됐어. 다시 시도해줄래?";
+    return { text: "도구 실행이 너무 많이 반복됐어. 다시 시도해줄래?", toolsUsed };
   }
 
   // 최종 텍스트 응답 추출
@@ -205,8 +224,17 @@ export async function chat(
     (block): block is Anthropic.TextBlock => block.type === "text"
   );
 
-  return textBlock?.text ?? "응답을 생성하지 못했어. 다시 시도해줄래?";
+  return { 
+    text: textBlock?.text ?? "응답을 생성하지 못했어. 다시 시도해줄래?",
+    toolsUsed
+  };
 }
+
+export type ChatSmartResult = {
+  text: string;
+  usedTools: boolean;
+  toolsUsed: ToolUseSummary[];
+};
 
 /**
  * 스마트 채팅 - 가능하면 스트리밍, 도구 필요하면 일반 호출
@@ -224,11 +252,11 @@ export async function chatSmart(
   systemPrompt: string,
   modelId: ModelId,
   onChunk?: (text: string, accumulated: string) => void | Promise<void>
-): Promise<{ text: string; usedTools: boolean }> {
+): Promise<ChatSmartResult> {
   // 스트리밍 콜백이 없으면 그냥 일반 chat 사용
   if (!onChunk) {
-    const text = await chat(messages, systemPrompt, modelId);
-    return { text, usedTools: false };
+    const result = await chat(messages, systemPrompt, modelId);
+    return { text: result.text, usedTools: result.toolsUsed.length > 0, toolsUsed: result.toolsUsed };
   }
 
   const client = getClient();
@@ -282,12 +310,12 @@ export async function chatSmart(
     // 주의: chat()은 내부에서 withRetry를 사용하므로 여기서 추가 재시도 불필요
     if (stopReason === "tool_use") {
       console.log("[Stream] Tool use detected, falling back to chat()");
-      const text = await chat(messages, systemPrompt, modelId);
-      return { text, usedTools: true };
+      const result = await chat(messages, systemPrompt, modelId);
+      return { text: result.text, usedTools: true, toolsUsed: result.toolsUsed };
     }
 
     // 성공적으로 스트리밍 완료
-    return { text: accumulated, usedTools: false };
+    return { text: accumulated, usedTools: false, toolsUsed: [] };
   } catch (error: unknown) {
     // 스트리밍 시작 전 에러 (연결 실패 등) - 재시도 가능
     if (!streamingStarted && error instanceof APIError) {
@@ -296,8 +324,8 @@ export async function chatSmart(
         console.log(`[Stream] Pre-stream error (${error.status}), retrying with withRetry...`);
         return await withRetry(async () => {
           // 재시도 시 일반 chat 사용 (스트리밍 대신)
-          const text = await chat(messages, systemPrompt, modelId);
-          return { text, usedTools: false };
+          const result = await chat(messages, systemPrompt, modelId);
+          return { text: result.text, usedTools: false, toolsUsed: result.toolsUsed };
         });
       }
     }
@@ -309,7 +337,8 @@ export async function chatSmart(
       if (accumulated.length > 0) {
         return { 
           text: accumulated + "\n\n(응답 생성 중 오류 발생)", 
-          usedTools: false 
+          usedTools: false,
+          toolsUsed: []
         };
       }
     }

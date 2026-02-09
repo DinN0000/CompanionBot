@@ -1,5 +1,9 @@
 import * as cheerio from "cheerio";
 
+// URL 내용 캐시 (중복 fetch 방지)
+const urlCache = new Map<string, { title: string; content: string; timestamp: number }>();
+const URL_CACHE_TTL = 10 * 60 * 1000; // 10분
+
 /**
  * 텍스트에서 URL을 추출합니다.
  */
@@ -87,6 +91,7 @@ export function isSafeUrl(url: string): boolean {
 
 /**
  * 웹페이지 내용을 가져옵니다.
+ * 캐시 지원으로 중복 fetch 방지
  */
 export async function fetchWebContent(
   url: string
@@ -95,6 +100,13 @@ export async function fetchWebContent(
   if (!isSafeUrl(url)) {
     console.log(`[Security] Blocked unsafe URL: ${url}`);
     return null;
+  }
+
+  // 캐시 확인
+  const cached = urlCache.get(url);
+  if (cached && Date.now() - cached.timestamp < URL_CACHE_TTL) {
+    console.log(`[URL] Cache hit: ${url}`);
+    return { title: cached.title, content: cached.content };
   }
 
   try {
@@ -136,11 +148,44 @@ export async function fetchWebContent(
     const content = mainContent
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 5000); // 5000자로 제한
+      .slice(0, 3000); // 5000 → 3000자로 제한 (토큰 절약)
+
+    // 캐시 저장
+    urlCache.set(url, { title, content, timestamp: Date.now() });
+
+    // 캐시 크기 제한 (최대 50개)
+    if (urlCache.size > 50) {
+      const oldestKey = urlCache.keys().next().value;
+      if (oldestKey) urlCache.delete(oldestKey);
+    }
 
     return { title, content };
   } catch (error) {
     console.error("Fetch error:", error);
     return null;
   }
+}
+
+/**
+ * URL 내용을 컨텍스트용 포맷으로 변환합니다.
+ * 히스토리에는 간략한 버전만, 현재 요청에는 전체 내용
+ */
+export function formatUrlContent(
+  url: string,
+  content: { title: string; content: string }
+): { 
+  forHistory: string;  // 히스토리에 저장될 간략 버전
+  forContext: string;  // 현재 요청에 주입될 전체 버전
+} {
+  const forHistory = `[링크: ${content.title}](${url})`;
+  const forContext = `\n---\n📎 ${url}\n📌 ${content.title}\n${content.content}\n---`;
+  
+  return { forHistory, forContext };
+}
+
+/**
+ * 캐시를 무효화합니다.
+ */
+export function clearUrlCache(): void {
+  urlCache.clear();
 }

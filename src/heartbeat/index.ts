@@ -173,10 +173,10 @@ ${context}
   let messageSent = false;
 
   try {
-    const response = await chat(messages, systemPrompt, "haiku");
+    const result = await chat(messages, systemPrompt, "haiku");
 
-    if (!response.trim().includes("HEARTBEAT_OK")) {
-      await botInstance.api.sendMessage(config.chatId, response);
+    if (!result.text.trim().includes("HEARTBEAT_OK")) {
+      await botInstance.api.sendMessage(config.chatId, result.text);
       console.log(`[Heartbeat] Sent message to ${config.chatId}`);
       messageSent = true;
 

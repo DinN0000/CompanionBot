@@ -2,6 +2,14 @@
 
 All notable changes to CompanionBot will be documented in this file.
 
+## [0.15.5] - 2026-02-10
+
+### ✨ CLI 가이드 개선
+- **브랜딩**: "봇" → "CompanionBot" 일관성 있게 사용
+- **환영 메시지**: "당신과 함께하는 AI 동반자" 의미 부여
+- **에러 안내**: 에러 유형별 상세 트러블슈팅 (Telegram 토큰, Anthropic 키 등)
+- **setSecret 에러 처리**: 키체인 저장 실패 시 해결 방법 안내
+
 ## [0.15.4] - 2026-02-10
 
 ### 🐛 첫 실행 버그 수정

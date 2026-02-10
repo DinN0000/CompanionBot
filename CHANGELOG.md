@@ -2,6 +2,16 @@
 
 All notable changes to CompanionBot will be documented in this file.
 
+## [0.15.6] - 2026-02-10
+
+### 📈 토큰 한도 확대
+- **MAX_CONTEXT**: 100k → 200k (Claude Code 수준)
+- **MAX_HISTORY**: 40k → 80k
+- **COMPACTION_THRESHOLD**: 35% → 50% (자동 압축 나중에 시작)
+
+### 💬 에러 메시지 간결화
+- "다시 시도해줄래?" 제거 - 불필요한 제안 삭제
+
 ## [0.15.5] - 2026-02-10
 
 ### ✨ CLI 가이드 개선

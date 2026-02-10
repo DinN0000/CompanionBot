@@ -16,6 +16,9 @@
 
 ## 🚀 빠른 시작
 
+
+**요구사항:** Node.js 18 이상
+
 ```bash
 npm install -g companionbot
 companionbot
@@ -51,7 +54,7 @@ companionbot -n           # --no-interactive 모드
 ```
 
 환경변수로 설정 (비대화형 모드에서 사용):
-- `TELEGRAM_BOT_TOKEN` - Telegram 봇 토큰
+- `TELEGRAM_TOKEN` - Telegram 봇 토큰
 - `ANTHROPIC_API_KEY` - Anthropic API 키
 
 ## 📱 텔레그램 명령어

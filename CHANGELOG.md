@@ -2,6 +2,27 @@
 
 All notable changes to CompanionBot will be documented in this file.
 
+## [0.16.0] - 2026-02-10
+
+### 🎉 Major: config.yaml 지원
+- 하드코딩 제거 → 사용자 설정 가능
+- 기본 모델: opus
+- `config.example.yaml` 포함
+
+### 🚀 초기 세팅 개선
+- **환경변수 폴백**: Docker/서버 환경 지원
+- **CLI 서브커맨드**: `setup weather/brave/telegram/anthropic`
+- **토큰 마스킹**: 입력 시 `*`로 가림
+- **형식 검증**: Telegram 토큰, Anthropic 키 형식 체크
+- **이미 저장된 값 스킵**: 중간 취소해도 기존 값 유지
+- **기능 선택 저장**: `~/.companionbot/features.json`
+- **non-interactive 모드**: `-n` 플래그로 Docker/CI 지원
+
+### 📚 문서 개선
+- CLI/텔레그램 명령어 분리
+- 누락된 명령어 추가
+- Node.js 18+ 요구사항 명시
+
 ## [0.15.6] - 2026-02-10
 
 ### 📈 토큰 한도 확대

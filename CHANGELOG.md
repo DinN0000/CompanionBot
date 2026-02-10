@@ -2,6 +2,13 @@
 
 All notable changes to CompanionBot will be documented in this file.
 
+## [0.15.3] - 2026-02-10
+
+### 📋 세션 핸드오프
+- **AGENTS.md**: "매 세션 시작" 섹션 추가
+- 세션 시작 시 읽어야 할 파일 순서 명시 (SOUL.md → USER.md → memory)
+- agentlinter 권장사항 반영
+
 ## [0.15.2] - 2025-02-09
 
 ### 🔓 OpenClaw 스타일 (기본 허용)

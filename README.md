@@ -26,7 +26,21 @@ companionbot
 2. Anthropic API Key 입력 ([console.anthropic.com](https://console.anthropic.com))
 3. Telegram에서 봇에게 `/start` 보내기
 
-## 📱 명령어
+## 🖥️ CLI 명령어
+
+터미널에서 실행하는 명령어:
+
+```bash
+companionbot              # 봇 시작
+companionbot setup        # 전체 설정 마법사
+companionbot setup weather   # 날씨 API 설정
+companionbot setup calendar  # Google Calendar 연동
+companionbot setup brave     # 웹 검색 API 설정
+```
+
+## 📱 텔레그램 명령어
+
+봇과 대화할 때 사용하는 명령어:
 
 | 명령어 | 설명 |
 |--------|------|
@@ -35,7 +49,6 @@ companionbot
 | `/compact` | 대화 정리 (토큰 절약) |
 | `/memory` | 최근 기억 보기 |
 | `/health` | 봇 상태 확인 |
-| `/setup` | 전체 기능 설정 |
 
 ### 자연어로도 가능
 
@@ -89,20 +102,11 @@ companionbot
 
 ## ⚙️ 선택 기능
 
-### 날씨 (OpenWeatherMap)
-```bash
-companionbot setup weather
-```
+위 CLI 명령어로 설정:
 
-### Google Calendar
-```bash
-companionbot setup calendar
-```
-
-### 웹 검색 (Brave Search)
-```bash
-companionbot setup brave
-```
+- **날씨** - OpenWeatherMap API (`companionbot setup weather`)
+- **일정** - Google Calendar 연동 (`companionbot setup calendar`)
+- **검색** - Brave Search API (`companionbot setup brave`)
 
 ## 🖥️ PM2로 상시 실행
 
@@ -137,9 +141,10 @@ rm -rf ~/.companionbot && companionbot
 
 ## 📜 버전
 
-현재: **v0.15.0**
+현재: **v0.15.2**
 
 주요 변경:
+- README 명령어 섹션 정리 (CLI/텔레그램 분리)
 - 메모리 검색 → 도구 방식 (성능 개선)
 - tools 모듈 분할 (15개 파일)
 - Agent 메모리 누수 방지

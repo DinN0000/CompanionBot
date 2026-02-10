@@ -11,6 +11,10 @@ import { cleanupHeartbeats } from "../heartbeat/index.js";
 import { cleanupBriefings } from "../briefing/index.js";
 import { cleanupReminders } from "../reminders/index.js";
 import { preloadEmbeddingModel, preloadVectorStore } from "../memory/index.js";
+import { saveFeatures, loadFeatures, logFeatures, type FeatureSelection } from "../config/features.js";
+
+// ===== CLI 옵션 =====
+let nonInteractiveMode = false;
 
 // ===== CLI 서브커맨드 처리 =====
 async function handleSetupCommand(args: string[]): Promise<boolean> {
@@ -87,15 +91,25 @@ CompanionBot 설정
 async function handleCLIArgs(): Promise<boolean> {
   const args = process.argv.slice(2);
   
-  if (args.length === 0) {
+  // 플래그 필터링 (-n, --no-interactive)
+  const filteredArgs: string[] = [];
+  for (const arg of args) {
+    if (arg === "-n" || arg === "--no-interactive") {
+      nonInteractiveMode = true;
+    } else {
+      filteredArgs.push(arg);
+    }
+  }
+  
+  if (filteredArgs.length === 0) {
     return false; // 서브커맨드 없음, 봇 시작
   }
 
-  const command = args[0];
+  const command = filteredArgs[0];
 
   switch (command) {
     case "setup":
-      return handleSetupCommand(args.slice(1));
+      return handleSetupCommand(filteredArgs.slice(1));
 
     case "--help":
     case "-h":
@@ -104,6 +118,7 @@ CompanionBot - Claude 기반 AI 동반자
 
 사용법:
   companionbot                 봇 시작 (첫 실행 시 설정 안내)
+  companionbot -n              봇 시작 (환경변수 모드, Docker/CI용)
   companionbot setup <...>     API 키 설정
 
 설정 명령어:
@@ -114,8 +129,16 @@ CompanionBot - Claude 기반 AI 동반자
   companionbot setup calendar          캘린더 설정 안내
 
 옵션:
-  -h, --help     도움말 표시
-  -v, --version  버전 표시
+  -n, --no-interactive  환경변수 모드 (프롬프트 없이 실행)
+                        필수 환경변수: TELEGRAM_TOKEN, ANTHROPIC_API_KEY
+  -h, --help            도움말 표시
+  -v, --version         버전 표시
+
+환경변수 (--no-interactive 모드):
+  TELEGRAM_TOKEN        Telegram Bot Token (필수)
+  ANTHROPIC_API_KEY     Anthropic API Key (필수)
+  BRAVE_API_KEY         Brave Search API Key (선택)
+  OPENWEATHERMAP_API_KEY OpenWeatherMap API Key (선택)
 `);
       return true;
 
@@ -157,11 +180,7 @@ async function question(rl: readline.Interface, prompt: string): Promise<string>
   });
 }
 
-interface FeatureSelection {
-  webSearch: boolean;
-  calendar: boolean;
-  weather: boolean;
-}
+// FeatureSelection은 ../config/features.js에서 import
 
 // 토큰/API 키 형식 검증
 function validateTelegramToken(token: string): boolean {
@@ -225,7 +244,7 @@ Telegram에서 대화하며 일정 관리, 메모, 검색 등을 도와줍니다
         ],
       });
     } catch {
-      console.log("\n👋 설정을 취소했습니다.");
+      console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
       rl.close();
       return false;
     }
@@ -251,72 +270,112 @@ Telegram에서 대화하며 일정 관리, 메모, 검색 등을 도와줍니다
 `);
 
     // Telegram Bot Token
-    console.log(`   📱 Telegram Bot Token
+    const existingToken = await getSecret("telegram-token");
+    let skipToken = false;
+    
+    if (existingToken) {
+      console.log(`   📱 Telegram Bot Token
+      ✓ 이미 설정됨 (${existingToken.slice(0, 8)}...)\n`);
+      try {
+        skipToken = await confirm({
+          message: "기존 값을 사용할까요?",
+          default: true,
+        });
+      } catch {
+        console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+        rl.close();
+        return false;
+      }
+    }
+
+    if (!skipToken) {
+      console.log(`   📱 Telegram Bot Token
    
       1. Telegram에서 @BotFather 검색
       2. /newbot → 이름 입력 → 유저네임 입력 (_bot으로 끝나야 함)
       3. 토큰 복사 (예: 123456:ABC-DEF...)
       🔗 https://t.me/BotFather
 `);
-    let token: string;
-    try {
-      token = await password({
-        message: "Token:",
-        mask: "*",
-        validate: (value) => {
-          if (!value || value.toLowerCase() === "q") return true; // Allow cancel
-          if (!validateTelegramToken(value)) {
-            return "형식 오류: 숫자:영문숫자_- (예: 123456789:ABC-def_123)";
-          }
-          return true;
-        },
-      });
-    } catch {
-      console.log("\n👋 설정을 취소했습니다.");
-      rl.close();
-      return false;
+      let token: string;
+      try {
+        token = await password({
+          message: "Token:",
+          mask: "*",
+          validate: (value) => {
+            if (!value || value.toLowerCase() === "q") return true; // Allow cancel
+            if (!validateTelegramToken(value)) {
+              return "형식 오류: 숫자:영문숫자_- (예: 123456789:ABC-def_123)";
+            }
+            return true;
+          },
+        });
+      } catch {
+        console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+        rl.close();
+        return false;
+      }
+      if (!token || token.toLowerCase() === "q") {
+        console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+        rl.close();
+        return false;
+      }
+      await setSecret("telegram-token", token);
+      console.log("      ✓ 저장됨\n");
     }
-    if (!token || token.toLowerCase() === "q") {
-      console.log("\n👋 설정을 취소했습니다.");
-      rl.close();
-      return false;
-    }
-    await setSecret("telegram-token", token);
-    console.log("      ✓ 저장됨\n");
 
     // Anthropic API Key
-    console.log(`   🧠 Anthropic API Key
+    const existingApiKey = await getSecret("anthropic-api-key");
+    let skipApiKey = false;
+    
+    if (existingApiKey) {
+      console.log(`   🧠 Anthropic API Key
+      ✓ 이미 설정됨 (${existingApiKey.slice(0, 12)}...)\n`);
+      try {
+        skipApiKey = await confirm({
+          message: "기존 값을 사용할까요?",
+          default: true,
+        });
+      } catch {
+        console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+        rl.close();
+        return false;
+      }
+    }
+
+    if (!skipApiKey) {
+      console.log(`   🧠 Anthropic API Key
    
       1. https://console.anthropic.com 접속 (회원가입/로그인)
       2. Settings > API Keys > Create Key
       3. 키 복사 (sk-ant-...)
       🔗 https://console.anthropic.com/settings/keys
 `);
-    let apiKey: string;
-    try {
-      apiKey = await password({
-        message: "API Key:",
-        mask: "*",
-        validate: (value) => {
-          if (!value || value.toLowerCase() === "q") return true; // Allow cancel
-          if (!validateAnthropicKey(value)) {
-            return "형식 오류: sk-ant- 로 시작해야 합니다";
-          }
-          return true;
-        },
-      });
-    } catch {
-      console.log("\n👋 설정을 취소했습니다. (Telegram 토큰은 저장됨)");
-      rl.close();
-      return false;
+      let apiKey: string;
+      try {
+        apiKey = await password({
+          message: "API Key:",
+          mask: "*",
+          validate: (value) => {
+            if (!value || value.toLowerCase() === "q") return true; // Allow cancel
+            if (!validateAnthropicKey(value)) {
+              return "형식 오류: sk-ant- 로 시작해야 합니다";
+            }
+            return true;
+          },
+        });
+      } catch {
+        console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+        rl.close();
+        return false;
+      }
+      if (!apiKey || apiKey.toLowerCase() === "q") {
+        console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+        rl.close();
+        return false;
+      }
+      await setSecret("anthropic-api-key", apiKey);
+      console.log("      ✓ 저장됨\n");
     }
-    if (!apiKey || apiKey.toLowerCase() === "q") {
-      console.log("\n👋 설정을 취소했습니다. (Telegram 토큰은 저장됨)");
-      rl.close();
-      return false;
-    }
-    await setSecret("anthropic-api-key", apiKey);
-    console.log("      ✓ 저장됨\n");
 
     // ===== STEP 3: 선택 API 키 =====
     if (features.webSearch || features.calendar || features.weather) {
@@ -329,43 +388,83 @@ Enter를 누르면 해당 기능을 건너뛸 수 있어요.
 
       // 웹 검색 API
       if (features.webSearch) {
-        console.log(`   🔍 Brave Search API (무료 2000회/월)
+        const existingBraveKey = await getSecret("brave-api-key");
+        let skipBrave = false;
+        
+        if (existingBraveKey) {
+          console.log(`   🔍 Brave Search API
+      ✓ 이미 설정됨 (${existingBraveKey.slice(0, 8)}...)\n`);
+          try {
+            skipBrave = await confirm({
+              message: "기존 값을 사용할까요?",
+              default: true,
+            });
+          } catch {
+            console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+            rl.close();
+            return false;
+          }
+        }
+        
+        if (!skipBrave) {
+          console.log(`   🔍 Brave Search API (무료 2000회/월)
    
       1. https://brave.com/search/api 접속
       2. Get Started > 가입 > API 키 생성
 `);
-        const braveKey = await question(rl, "      API Key (Enter=건너뛰기, q=취소): ");
-        if (braveKey.toLowerCase() === "q") {
-          console.log("\n👋 설정을 취소했습니다.");
-          rl.close();
-          return false;
-        }
-        if (braveKey) {
-          await setSecret("brave-api-key", braveKey);
-          console.log("      ✓ 저장됨\n");
-        } else {
-          console.log("      → 건너뜀 (나중에: companionbot setup brave <KEY>)\n");
+          const braveKey = await question(rl, "      API Key (Enter=건너뛰기, q=취소): ");
+          if (braveKey.toLowerCase() === "q") {
+            console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+            rl.close();
+            return false;
+          }
+          if (braveKey) {
+            await setSecret("brave-api-key", braveKey);
+            console.log("      ✓ 저장됨\n");
+          } else {
+            console.log("      → 건너뜀 (나중에: companionbot setup brave <KEY>)\n");
+          }
         }
       }
 
       // 날씨 API
       if (features.weather) {
-        console.log(`   🌤️  OpenWeatherMap API (무료)
+        const existingWeatherKey = await getSecret("openweathermap-api-key");
+        let skipWeather = false;
+        
+        if (existingWeatherKey) {
+          console.log(`   🌤️  OpenWeatherMap API
+      ✓ 이미 설정됨 (${existingWeatherKey.slice(0, 8)}...)\n`);
+          try {
+            skipWeather = await confirm({
+              message: "기존 값을 사용할까요?",
+              default: true,
+            });
+          } catch {
+            console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+            rl.close();
+            return false;
+          }
+        }
+        
+        if (!skipWeather) {
+          console.log(`   🌤️  OpenWeatherMap API (무료)
    
       1. https://openweathermap.org 접속 > Sign Up
       2. API Keys 메뉴에서 키 확인/생성
 `);
-        const weatherKey = await question(rl, "      API Key (Enter=건너뛰기, q=취소): ");
-        if (weatherKey.toLowerCase() === "q") {
-          console.log("\n👋 설정을 취소했습니다.");
-          rl.close();
-          return false;
-        }
-        if (weatherKey) {
-          await setSecret("openweathermap-api-key", weatherKey);
-          console.log("      ✓ 저장됨\n");
-        } else {
-          console.log("      → 건너뜀 (나중에: companionbot setup weather <KEY>)\n");
+          const weatherKey = await question(rl, "      API Key (Enter=건너뛰기, q=취소): ");
+          if (weatherKey.toLowerCase() === "q") {
+            console.log("\n👋 설정을 취소했습니다. (이미 저장된 값은 유지됨)");
+            rl.close();
+            return false;
+          }
+          if (weatherKey) {
+            await setSecret("openweathermap-api-key", weatherKey);
+            console.log("      ✓ 저장됨\n");
+          } else {
+            console.log("      → 건너뜀 (나중에: companionbot setup weather <KEY>)\n");
+          }
         }
       }
 
@@ -380,6 +479,9 @@ Enter를 누르면 해당 기능을 건너뛸 수 있어요.
         console.log("");
       }
     }
+
+    // 기능 선택 상태 저장
+    saveFeatures(features);
 
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ 설정 완료!
@@ -401,20 +503,58 @@ async function main() {
     process.exit(0);
   }
 
-  // 1. 시크릿 확인
-  let token = await getSecret("telegram-token");
-  let apiKey = await getSecret("anthropic-api-key");
+  let token: string | undefined;
+  let apiKey: string | undefined;
 
-  // 2. 시크릿이 없으면 인터랙티브 설정
-  if (!token || !apiKey) {
-    const success = await interactiveSetup();
-    if (!success) {
+  // Non-interactive 모드: 환경변수에서만 읽기
+  if (nonInteractiveMode) {
+    token = process.env.TELEGRAM_TOKEN;
+    apiKey = process.env.ANTHROPIC_API_KEY;
+
+    const missing: string[] = [];
+    if (!token) missing.push("TELEGRAM_TOKEN");
+    if (!apiKey) missing.push("ANTHROPIC_API_KEY");
+
+    if (missing.length > 0) {
+      console.error(`❌ Non-interactive 모드: 필수 환경변수 누락
+
+누락된 환경변수:
+${missing.map(v => `  - ${v}`).join("\n")}
+
+사용 예시:
+  TELEGRAM_TOKEN=xxx ANTHROPIC_API_KEY=xxx companionbot -n
+
+Docker 예시:
+  docker run -e TELEGRAM_TOKEN=xxx -e ANTHROPIC_API_KEY=xxx companionbot
+`);
       process.exit(1);
     }
 
-    // 다시 읽기
-    token = await getSecret("telegram-token");
-    apiKey = await getSecret("anthropic-api-key");
+    // 선택적 환경변수도 설정
+    if (process.env.BRAVE_API_KEY) {
+      await setSecret("brave-api-key", process.env.BRAVE_API_KEY);
+    }
+    if (process.env.OPENWEATHERMAP_API_KEY) {
+      await setSecret("openweathermap-api-key", process.env.OPENWEATHERMAP_API_KEY);
+    }
+
+    console.log("✓ Non-interactive 모드: 환경변수에서 설정 로드됨");
+  } else {
+    // Interactive 모드: 키체인에서 읽기
+    token = await getSecret("telegram-token") ?? undefined;
+    apiKey = await getSecret("anthropic-api-key") ?? undefined;
+
+    // 시크릿이 없으면 인터랙티브 설정
+    if (!token || !apiKey) {
+      const success = await interactiveSetup();
+      if (!success) {
+        process.exit(1);
+      }
+
+      // 다시 읽기
+      token = await getSecret("telegram-token") ?? undefined;
+      apiKey = await getSecret("anthropic-api-key") ?? undefined;
+    }
   }
 
   if (!token || !apiKey) {
@@ -468,11 +608,20 @@ async function main() {
   console.log(`   ✓ 사전 로딩 완료 (${Date.now() - preloadStart}ms)
 `);
 
-  // 6. CompanionBot 시작
+  // 6. 활성화된 기능 표시
+  const enabledFeatures = loadFeatures();
+  const featureList = [];
+  if (enabledFeatures.webSearch) featureList.push("🔍 웹 검색");
+  if (enabledFeatures.calendar) featureList.push("📅 캘린더");
+  if (enabledFeatures.weather) featureList.push("🌤️ 날씨");
+
+  // 7. CompanionBot 시작
   console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║                  🚀 CompanionBot 시작!                        ║
 ╚═══════════════════════════════════════════════════════════════╝
+
+   활성화된 기능: ${featureList.length > 0 ? featureList.join(", ") : "기본 기능만"}
 `);
 
   const bot = createBot(token);
